@@ -20,6 +20,7 @@ fabro-config = { path = "../fabro-config" }
 fabro-environment.workspace = true
 fabro-model = { path = "../fabro-model" }
 fabro-types = { path = "../fabro-types" }
+fabro-workflow-version = { path = "../../components/fabro-workflow-version" }
 progenitor-client = "0.13"
 regress = "0.10"
 reqwest.workspace = true

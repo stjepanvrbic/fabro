@@ -1,0 +1,334 @@
+use std::sync::Arc;
+
+use axum::extract::DefaultBodyLimit;
+use axum::extract::rejection::JsonRejection;
+use fabro_api::types::{CreateWorkflowVersionResponse, WorkflowVersion};
+use fabro_store::{WorkflowVersionStore, WorkflowVersionStoreError};
+use fabro_util::error;
+use fabro_workflow_version::MAX_WORKFLOW_VERSION_BYTES;
+
+use super::super::{
+    ApiError, AppState, IntoResponse, Json, RequiredUser, Response, Router, State, StatusCode, post,
+};
+
+const INVALID_JSON_CODE: &str = "invalid_json";
+const INVALID_VERSION_CODE: &str = "workflow_version_invalid";
+const DEPENDENCY_NOT_FOUND_CODE: &str = "workflow_version_dependency_not_found";
+const VERSION_TOO_LARGE_CODE: &str = "workflow_version_too_large";
+
+pub(super) fn routes() -> Router<Arc<AppState>> {
+    Router::new().route(
+        "/workflow-versions",
+        post(create_workflow_version).layer(DefaultBodyLimit::max(MAX_WORKFLOW_VERSION_BYTES)),
+    )
+}
+
+async fn create_workflow_version(
+    _auth: RequiredUser,
+    State(state): State<Arc<AppState>>,
+    payload: Result<Json<WorkflowVersion>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(version) = payload.map_err(json_rejection)?;
+    let blobs = state.store_ref().blobs().await.map_err(|err| {
+        tracing::error!(
+            error = %err,
+            error_chain = ?error::collect_chain(&err),
+            "Failed to open workflow version storage"
+        );
+        internal_store_error()
+    })?;
+    let store = WorkflowVersionStore::new(blobs);
+    let workflow_version_id = store.put(&version).await.map_err(store_error)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateWorkflowVersionResponse {
+            workflow_version_id,
+        }),
+    )
+        .into_response())
+}
+
+fn json_rejection(rejection: JsonRejection) -> ApiError {
+    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return ApiError::with_code(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "workflow version request exceeds 2 MiB",
+            VERSION_TOO_LARGE_CODE,
+        );
+    }
+
+    match rejection {
+        JsonRejection::JsonDataError(err) => ApiError::with_code(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            err.body_text(),
+            INVALID_VERSION_CODE,
+        ),
+        JsonRejection::JsonSyntaxError(err) => {
+            ApiError::with_code(StatusCode::BAD_REQUEST, err.body_text(), INVALID_JSON_CODE)
+        }
+        JsonRejection::MissingJsonContentType(err) => {
+            ApiError::with_code(StatusCode::BAD_REQUEST, err.body_text(), INVALID_JSON_CODE)
+        }
+        JsonRejection::BytesRejection(err) => {
+            ApiError::with_code(StatusCode::BAD_REQUEST, err.body_text(), INVALID_JSON_CODE)
+        }
+        _ => ApiError::with_code(
+            StatusCode::BAD_REQUEST,
+            "invalid JSON request",
+            INVALID_JSON_CODE,
+        ),
+    }
+}
+
+fn store_error(err: WorkflowVersionStoreError) -> ApiError {
+    if err.is_dependency_unavailable() {
+        return ApiError::with_code(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            err.to_string(),
+            DEPENDENCY_NOT_FOUND_CODE,
+        );
+    }
+
+    match err {
+        WorkflowVersionStoreError::InvalidVersion(source) => ApiError::with_code(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            source.to_string(),
+            INVALID_VERSION_CODE,
+        ),
+        err => {
+            tracing::error!(
+                error = %err,
+                error_chain = ?error::collect_chain(&err),
+                "Workflow version store operation failed"
+            );
+            internal_store_error()
+        }
+    }
+}
+
+fn internal_store_error() -> ApiError {
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "workflow version store operation failed",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Method, Request, StatusCode, header};
+    use axum::response::IntoResponse;
+    use fabro_types::WorkflowVersionId;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use super::{
+        DEPENDENCY_NOT_FOUND_CODE, INVALID_JSON_CODE, INVALID_VERSION_CODE,
+        MAX_WORKFLOW_VERSION_BYTES, VERSION_TOO_LARGE_CODE, store_error,
+    };
+    use crate::server;
+    use crate::test_support::{self, TestAppStateBuilder};
+
+    const GRAPH: &str = "digraph W { start [shape=Mdiamond] exit [shape=Msquare] start -> exit }";
+
+    fn request(body: impl Into<Body>) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/workflow-versions")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.into())
+            .unwrap()
+    }
+
+    fn version(graph: &str) -> Value {
+        json!({
+            "entrypoint": "workflow.fabro",
+            "files": { "workflow.fabro": graph },
+            "dependencies": {}
+        })
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn error_code(body: &Value) -> &str {
+        body["errors"][0]["code"].as_str().unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_requires_authenticated_user() {
+        let state = TestAppStateBuilder::new().build();
+        let app = server::build_router(state, test_support::test_auth_mode());
+        let response = app
+            .oneshot(request(serde_json::to_vec(&version(GRAPH)).unwrap()))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn valid_and_equivalent_requests_return_the_same_id() {
+        let state = TestAppStateBuilder::new().build();
+        let app = test_support::build_test_router(Arc::clone(&state));
+        let first = app
+            .clone()
+            .oneshot(request(serde_json::to_vec(&version(GRAPH)).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let first = response_json(first).await;
+        assert_eq!(first.as_object().unwrap().len(), 1);
+
+        let reordered = format!(
+            r#"{{"dependencies":{{}},"files":{{"workflow.fabro":{}}},"entrypoint":"workflow.fabro"}}"#,
+            serde_json::to_string(GRAPH).unwrap()
+        );
+        let second = app.oneshot(request(reordered)).await.unwrap();
+        assert_eq!(second.status(), StatusCode::CREATED);
+        assert_eq!(response_json(second).await, first);
+
+        let id = first["workflow_version_id"]
+            .as_str()
+            .unwrap()
+            .parse::<WorkflowVersionId>()
+            .unwrap();
+        assert!(
+            state
+                .store_ref()
+                .blobs()
+                .await
+                .unwrap()
+                .read(&id.into())
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_json_and_domain_content_have_distinct_codes() {
+        let app = test_support::build_test_router(TestAppStateBuilder::new().build());
+        let malformed = app.clone().oneshot(request("{")).await.unwrap();
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error_code(&response_json(malformed).await),
+            INVALID_JSON_CODE
+        );
+
+        let unknown = json!({
+            "entrypoint": "workflow.fabro",
+            "files": { "workflow.fabro": GRAPH },
+            "dependencies": {},
+            "metadata": {}
+        });
+        let invalid = app
+            .oneshot(request(serde_json::to_vec(&unknown).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            error_code(&response_json(invalid).await),
+            INVALID_VERSION_CODE
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_dependency_has_specific_code() {
+        let state = TestAppStateBuilder::new().build();
+        let app = test_support::build_test_router(Arc::clone(&state));
+        let missing_id = WorkflowVersionId::from(fabro_types::RunBlobId::new(b"missing"));
+        let arbitrary_id = WorkflowVersionId::from(
+            state
+                .store_ref()
+                .blobs()
+                .await
+                .unwrap()
+                .write(b"not a workflow version")
+                .await
+                .unwrap(),
+        );
+
+        for dependency_id in [missing_id, arbitrary_id] {
+            let root = json!({
+                "entrypoint": "workflow.fabro",
+                "files": {
+                    "workflow.fabro": "digraph W { child [stack.child_workflow=\"child.fabro\"] }"
+                },
+                "dependencies": { "child.fabro": dependency_id }
+            });
+            let response = app
+                .clone()
+                .oneshot(request(serde_json::to_vec(&root).unwrap()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(
+                error_code(&response_json(response).await),
+                DEPENDENCY_NOT_FOUND_CODE
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stored_child_can_be_pinned_as_a_dependency() {
+        let app = test_support::build_test_router(TestAppStateBuilder::new().build());
+        let child = app
+            .clone()
+            .oneshot(request(serde_json::to_vec(&version(GRAPH)).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(child.status(), StatusCode::CREATED);
+        let child_id = response_json(child).await["workflow_version_id"].clone();
+        let root = json!({
+            "entrypoint": "workflow.fabro",
+            "files": {
+                "workflow.fabro": "digraph W { child [stack.child_workflow=\"child.fabro\"] }"
+            },
+            "dependencies": { "child.fabro": child_id }
+        });
+
+        let response = app
+            .oneshot(request(serde_json::to_vec(&root).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(response_json(response).await.as_object().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn body_limit_has_specific_code() {
+        let app = test_support::build_test_router(TestAppStateBuilder::new().build());
+        let response = app
+            .oneshot(request(vec![b' '; MAX_WORKFLOW_VERSION_BYTES + 1]))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            error_code(&response_json(response).await),
+            VERSION_TOO_LARGE_CODE
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_fault_response_is_curated() {
+        let response = store_error(fabro_store::WorkflowVersionStoreError::Storage {
+            source: fabro_store::Error::Other("private persistence detail".to_string()),
+        })
+        .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = response_json(response).await;
+        assert_eq!(
+            body["errors"][0]["detail"],
+            "workflow version store operation failed"
+        );
+        assert!(!body.to_string().contains("private persistence detail"));
+    }
+}

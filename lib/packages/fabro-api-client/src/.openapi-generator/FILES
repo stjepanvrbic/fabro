@@ -22,6 +22,7 @@ api/sessions-api.ts
 api/settings-api.ts
 api/system-api.ts
 api/variables-api.ts
+api/workflow-versions-api.ts
 api/workflows-api.ts
 base.ts
 common.ts
@@ -105,6 +106,7 @@ models/create-run-pull-request-request.ts
 models/create-run-session-request.ts
 models/create-secret-request.ts
 models/create-variable-request.ts
+models/create-workflow-version-response.ts
 models/delete-run-response.ts
 models/delete-run-sandbox.ts
 models/delete-secret-request.ts
@@ -541,4 +543,5 @@ models/workflow-ref.ts
 models/workflow-reference.ts
 models/workflow-schedule-summary.ts
 models/workflow-settings.ts
+models/workflow-version.ts
 models/write-blob-response.ts

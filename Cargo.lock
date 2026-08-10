@@ -2328,6 +2328,7 @@ dependencies = [
  "fabro-environment",
  "fabro-model",
  "fabro-types",
+ "fabro-workflow-version",
  "openapiv3",
  "prettyplease",
  "progenitor",
@@ -2676,6 +2677,7 @@ name = "fabro-graphviz"
 version = "0.316.0-nightly.0"
 dependencies = [
  "anyhow",
+ "fabro-template",
  "fabro-types",
  "graphviz-sys",
  "nom",
@@ -3060,6 +3062,7 @@ dependencies = [
  "fabro-variable",
  "fabro-vault",
  "fabro-workflow",
+ "fabro-workflow-version",
  "futures-util",
  "globset",
  "hex",
@@ -3146,6 +3149,7 @@ dependencies = [
  "fabro-db",
  "fabro-types",
  "fabro-util",
+ "fabro-workflow-version",
  "futures",
  "hex",
  "insta",
@@ -3428,6 +3432,19 @@ dependencies = [
  "ulid",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "fabro-workflow-version"
+version = "0.316.0-nightly.0"
+dependencies = [
+ "fabro-config",
+ "fabro-graphviz",
+ "fabro-template",
+ "fabro-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

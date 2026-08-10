@@ -16,6 +16,7 @@ workspace = true
 anyhow.workspace = true
 graphviz-sys.workspace = true
 fabro-types = { path = "../../foundation/fabro-types" }
+fabro-template = { path = "../../foundation/fabro-template" }
 nom = "7"
 regex = { workspace = true }
 serde = { workspace = true }

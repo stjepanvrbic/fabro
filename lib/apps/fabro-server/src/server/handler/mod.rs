@@ -30,6 +30,7 @@ mod steer;
 pub(in crate::server) mod system;
 mod variables;
 mod worker_control;
+mod workflow_versions;
 
 pub(super) use system::{health, openapi_spec};
 
@@ -226,6 +227,7 @@ pub(super) fn real_routes() -> Router<Arc<AppState>> {
         .merge(secrets::routes())
         .merge(variables::routes())
         .merge(worker_control::routes())
+        .merge(workflow_versions::routes())
         .merge(sessions::routes())
         .merge(system::routes())
         .merge(completions::routes())

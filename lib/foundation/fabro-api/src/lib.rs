@@ -73,8 +73,10 @@ pub mod types {
         StageModelUsage, StageOutcome, StageProjection, StageState, StageToolBatchProjection,
         SubAgentProjection, SubAgentStatus, SystemActorKind, SystemIntegrationStatus,
         SystemIntegrationsResponse, TodoListProjection, TurnId, UpdateVariableRequest,
-        UserPrincipal, Variable, VariableListResponse, WorkflowSettings,
+        UserPrincipal, Variable, VariableListResponse, WorkflowPath, WorkflowSettings,
+        WorkflowVersionId,
     };
+    pub use fabro_workflow_version::WorkflowVersion;
 
     pub use crate::generated::types::*;
 }

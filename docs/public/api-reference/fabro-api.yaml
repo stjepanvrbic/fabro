@@ -33,6 +33,8 @@ tags:
     description: Internal run details (stages, turns, context, configuration)
   - name: Workflows
     description: Workflow definitions and execution
+  - name: Workflow Versions
+    description: Immutable, content-addressed workflow packages
   - name: Billing
     description: Token counts and billed totals
   - name: Insights
@@ -1057,6 +1059,69 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
           description: Turn is not active for this session
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Workflow Versions ─────────────────────────────────────────────────
+
+  /api/v1/workflow-versions:
+    post:
+      operationId: createWorkflowVersion
+      tags: [Workflow Versions]
+      summary: Create Workflow Version
+      description: >-
+        Validates and stores an immutable workflow package in content-addressed
+        storage. Repeating the same canonical content returns the same identifier.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowVersion"
+      responses:
+        "201":
+          description: Workflow version stored or already present
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateWorkflowVersionResponse"
+        "400":
+          description: Malformed JSON (`invalid_json`)
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Request body exceeds 2 MiB (`workflow_version_too_large`)
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: >-
+            Invalid workflow content (`workflow_version_invalid`) or an absent,
+            invalid, or non-canonical dependency
+            (`workflow_version_dependency_not_found`)
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Workflow version storage failed
           headers:
             x-request-id:
               $ref: "#/components/headers/XRequestId"
@@ -9073,6 +9138,69 @@ components:
           $ref: "#/components/schemas/FailureReason"
         detail:
           $ref: "#/components/schemas/FailureDetail"
+
+    WorkflowPath:
+      description: >-
+        Canonical portable path inside one workflow version. Paths are UTF-8,
+        relative, at most 240 bytes and 16 components, and cannot contain empty,
+        dot, parent, backslash, control, tilde-root, or drive-letter segments.
+        Map keys receive stricter byte and structural validation in the domain
+        model than OpenAPI can express.
+      type: string
+      minLength: 1
+      maxLength: 240
+      example: graphs/main.fabro
+
+    WorkflowVersionId:
+      description: SHA-256 identity of validated canonical workflow-version bytes.
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+      example: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+    WorkflowVersion:
+      description: >-
+        Complete immutable package for one rooted workflow. It contains at most
+        512 files, each at most 512 KiB of UTF-8 content, and its compact
+        canonical JSON representation is at most 2 MiB.
+      type: object
+      additionalProperties: false
+      required:
+        - entrypoint
+        - files
+        - dependencies
+      properties:
+        entrypoint:
+          $ref: "#/components/schemas/WorkflowPath"
+        files:
+          type: object
+          description: >-
+            Workflow-local text files keyed by canonical path. Keys receive
+            stricter domain validation than OpenAPI can express; each value is
+            limited to 512 KiB of UTF-8 bytes.
+          maxProperties: 512
+          propertyNames:
+            $ref: "#/components/schemas/WorkflowPath"
+          additionalProperties:
+            type: string
+        dependencies:
+          type: object
+          description: >-
+            Exact stored workflow-version IDs keyed by resolved child-workflow
+            path. Keys receive stricter domain validation than OpenAPI can express.
+          propertyNames:
+            $ref: "#/components/schemas/WorkflowPath"
+          additionalProperties:
+            $ref: "#/components/schemas/WorkflowVersionId"
+
+    CreateWorkflowVersionResponse:
+      description: Identity of the stored immutable workflow version.
+      type: object
+      additionalProperties: false
+      required:
+        - workflow_version_id
+      properties:
+        workflow_version_id:
+          $ref: "#/components/schemas/WorkflowVersionId"
 
     RunManifest:
       description: Self-contained workflow run manifest.

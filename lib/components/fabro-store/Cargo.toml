@@ -16,6 +16,7 @@ test-support = []
 
 [dependencies]
 fabro-types = { path = "../../foundation/fabro-types" }
+fabro-workflow-version = { path = "../fabro-workflow-version" }
 fabro-util = { path = "../../foundation/fabro-util" }
 hex.workspace = true
 slatedb.workspace = true

@@ -722,6 +722,13 @@ fn main() {
         ("CompletionMessage", "fabro_types::Message", &[]),
         ("CompletionMessageRole", "fabro_types::Role", &[]),
         ("CompletionContentPart", "fabro_types::ContentPart", &[]),
+        (
+            "WorkflowVersion",
+            "fabro_workflow_version::WorkflowVersion",
+            &[],
+        ),
+        ("WorkflowPath", "fabro_types::WorkflowPath", &[]),
+        ("WorkflowVersionId", "fabro_types::WorkflowVersionId", &[]),
         ("CostSource", "fabro_model::CostSource", &[]),
     ];
     for (name, path, impls) in replacements {

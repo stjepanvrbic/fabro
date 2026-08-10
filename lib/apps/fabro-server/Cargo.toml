@@ -32,6 +32,7 @@ fabro-hooks = { path = "../../components/fabro-hooks" }
 fabro-interview = { path = "../../components/fabro-interview" }
 fabro-slack = { path = "../../components/fabro-slack" }
 fabro-workflow = { path = "../../components/fabro-workflow" }
+fabro-workflow-version = { path = "../../components/fabro-workflow-version" }
 fabro-validate = { path = "../../components/fabro-validate" }
 fabro-sandbox = { path = "../../components/fabro-sandbox", features = ["daytona", "docker"] }
 fabro-github = { path = "../../components/fabro-github" }

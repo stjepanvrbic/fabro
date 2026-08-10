@@ -54,6 +54,8 @@ pub mod timing;
 pub mod todo;
 pub mod transcript;
 pub mod variable;
+pub mod workflow_path;
+pub mod workflow_version_id;
 
 pub use artifact::ArtifactUpload;
 pub use auth::{IdpIdentity, IdpIdentityError};
@@ -183,3 +185,7 @@ pub use transcript::{
 pub use variable::{
     CreateVariableRequest, UpdateVariableRequest, Variable, VariableListResponse, is_env_style_name,
 };
+pub use workflow_path::{
+    MAX_WORKFLOW_PATH_BYTES, MAX_WORKFLOW_PATH_COMPONENTS, WorkflowPath, WorkflowPathParseError,
+};
+pub use workflow_version_id::{WorkflowVersionId, WorkflowVersionIdParseError};
