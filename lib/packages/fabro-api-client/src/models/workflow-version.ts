@@ -29,5 +29,5 @@ export interface WorkflowVersion {
     /**
      * Exact stored workflow-version IDs keyed by resolved child-workflow path. Keys receive stricter domain validation than OpenAPI can express.
      */
-    'dependencies': { [key: string]: string; };
+    'workflow_dependencies': { [key: string]: string; };
 }

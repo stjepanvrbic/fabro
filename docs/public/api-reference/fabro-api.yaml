@@ -9167,7 +9167,7 @@ components:
       required:
         - entrypoint
         - files
-        - dependencies
+        - workflow_dependencies
       properties:
         entrypoint:
           $ref: "#/components/schemas/WorkflowPath"
@@ -9182,7 +9182,7 @@ components:
             $ref: "#/components/schemas/WorkflowPath"
           additionalProperties:
             type: string
-        dependencies:
+        workflow_dependencies:
           type: object
           description: >-
             Exact stored workflow-version IDs keyed by resolved child-workflow

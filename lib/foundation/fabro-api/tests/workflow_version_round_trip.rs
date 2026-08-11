@@ -22,7 +22,7 @@ fn workflow_version_round_trips_exact_wire_shape() {
             "prompts/goal.md": "Ship it",
             "workflow.fabro": "digraph W { start [shape=Mdiamond] exit [shape=Msquare] start -> exit }"
         },
-        "dependencies": {}
+        "workflow_dependencies": {}
     });
 
     let version: ApiWorkflowVersion = serde_json::from_value(value.clone()).unwrap();
@@ -36,7 +36,7 @@ fn workflow_version_replacement_rejects_unknown_fields() {
         "files": {
             "workflow.fabro": "digraph W {}"
         },
-        "dependencies": {},
+        "workflow_dependencies": {},
         "metadata": {}
     });
 

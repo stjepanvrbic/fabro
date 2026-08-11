@@ -218,7 +218,7 @@ fn validate_graph_closure(version: &WorkflowVersion) -> Result<(), WorkflowVersi
     }
 
     let configured = version
-        .dependencies()
+        .workflow_dependencies()
         .keys()
         .cloned()
         .collect::<BTreeSet<_>>();
@@ -355,7 +355,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(version.version().dependencies().len(), 1);
+        assert_eq!(version.version().workflow_dependencies().len(), 1);
     }
 
     #[test]

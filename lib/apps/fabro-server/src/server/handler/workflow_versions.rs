@@ -150,7 +150,7 @@ mod tests {
         json!({
             "entrypoint": "workflow.fabro",
             "files": { "workflow.fabro": graph },
-            "dependencies": {}
+            "workflow_dependencies": {}
         })
     }
 
@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(first.as_object().unwrap().len(), 1);
 
         let reordered = format!(
-            r#"{{"dependencies":{{}},"files":{{"workflow.fabro":{}}},"entrypoint":"workflow.fabro"}}"#,
+            r#"{{"workflow_dependencies":{{}},"files":{{"workflow.fabro":{}}},"entrypoint":"workflow.fabro"}}"#,
             serde_json::to_string(GRAPH).unwrap()
         );
         let second = app.oneshot(request(reordered)).await.unwrap();
@@ -227,7 +227,7 @@ mod tests {
         let unknown = json!({
             "entrypoint": "workflow.fabro",
             "files": { "workflow.fabro": GRAPH },
-            "dependencies": {},
+            "workflow_dependencies": {},
             "metadata": {}
         });
         let invalid = app
@@ -263,7 +263,7 @@ mod tests {
                 "files": {
                     "workflow.fabro": "digraph W { child [stack.child_workflow=\"child.fabro\"] }"
                 },
-                "dependencies": { "child.fabro": dependency_id }
+                "workflow_dependencies": { "child.fabro": dependency_id }
             });
             let response = app
                 .clone()
@@ -293,7 +293,7 @@ mod tests {
             "files": {
                 "workflow.fabro": "digraph W { child [stack.child_workflow=\"child.fabro\"] }"
             },
-            "dependencies": { "child.fabro": child_id }
+            "workflow_dependencies": { "child.fabro": child_id }
         });
 
         let response = app

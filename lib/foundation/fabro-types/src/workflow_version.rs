@@ -47,21 +47,21 @@ pub enum WorkflowVersionShapeError {
 /// `fabro-workflow-version`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct WorkflowVersion {
-    entrypoint:   WorkflowPath,
-    files:        BTreeMap<WorkflowPath, String>,
-    dependencies: BTreeMap<WorkflowPath, WorkflowVersionId>,
+    entrypoint:            WorkflowPath,
+    files:                 BTreeMap<WorkflowPath, String>,
+    workflow_dependencies: BTreeMap<WorkflowPath, WorkflowVersionId>,
 }
 
 impl WorkflowVersion {
     pub fn new(
         entrypoint: WorkflowPath,
         files: BTreeMap<WorkflowPath, String>,
-        dependencies: BTreeMap<WorkflowPath, WorkflowVersionId>,
+        workflow_dependencies: BTreeMap<WorkflowPath, WorkflowVersionId>,
     ) -> Result<Self, WorkflowVersionShapeError> {
         let version = Self {
             entrypoint,
             files,
-            dependencies,
+            workflow_dependencies,
         };
         version.validate_shape()?;
         version.canonical_bytes()?;
@@ -79,8 +79,8 @@ impl WorkflowVersion {
     }
 
     #[must_use]
-    pub fn dependencies(&self) -> &BTreeMap<WorkflowPath, WorkflowVersionId> {
-        &self.dependencies
+    pub fn workflow_dependencies(&self) -> &BTreeMap<WorkflowPath, WorkflowVersionId> {
+        &self.workflow_dependencies
     }
 
     /// Serialize to the canonical wire form.
@@ -125,11 +125,11 @@ impl WorkflowVersion {
 
     fn validate_path_collisions(&self) -> Result<(), WorkflowVersionShapeError> {
         // Keys are unique within each map, so equality can only collide
-        // across files and dependencies.
+        // across files and workflow dependencies.
         let paths = self
             .files
             .keys()
-            .chain(self.dependencies.keys())
+            .chain(self.workflow_dependencies.keys())
             .collect::<Vec<_>>();
         for (index, first) in paths.iter().enumerate() {
             for second in &paths[index + 1..] {
@@ -153,13 +153,14 @@ impl<'de> Deserialize<'de> for WorkflowVersion {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
-            entrypoint:   WorkflowPath,
-            files:        UniqueBTreeMap<WorkflowPath, String>,
-            dependencies: UniqueBTreeMap<WorkflowPath, WorkflowVersionId>,
+            entrypoint:            WorkflowPath,
+            files:                 UniqueBTreeMap<WorkflowPath, String>,
+            workflow_dependencies: UniqueBTreeMap<WorkflowPath, WorkflowVersionId>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.entrypoint, wire.files.0, wire.dependencies.0).map_err(D::Error::custom)
+        Self::new(wire.entrypoint, wire.files.0, wire.workflow_dependencies.0)
+            .map_err(D::Error::custom)
     }
 }
 
@@ -234,7 +235,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(version.canonical_bytes().unwrap()).unwrap(),
-            r#"{"entrypoint":"workflow.fabro","files":{"a.txt":"A","workflow.fabro":"digraph W {}","z.txt":"Z"},"dependencies":{}}"#
+            r#"{"entrypoint":"workflow.fabro","files":{"a.txt":"A","workflow.fabro":"digraph W {}","z.txt":"Z"},"workflow_dependencies":{}}"#
         );
     }
 
@@ -364,7 +365,7 @@ mod tests {
         let unknown = r#"{
             "entrypoint":"workflow.fabro",
             "files":{"workflow.fabro":"digraph W {}"},
-            "dependencies":{},
+            "workflow_dependencies":{},
             "metadata":{}
         }"#;
         assert!(serde_json::from_str::<WorkflowVersion>(unknown).is_err());
@@ -372,7 +373,7 @@ mod tests {
         let duplicate = r#"{
             "entrypoint":"workflow.fabro",
             "files":{"workflow.fabro":"digraph W {}","workflow.fabro":"digraph X {}"},
-            "dependencies":{}
+            "workflow_dependencies":{}
         }"#;
         assert!(serde_json::from_str::<WorkflowVersion>(duplicate).is_err());
     }

@@ -60,7 +60,7 @@ impl WorkflowVersionStore {
         version: &ValidatedWorkflowVersion,
     ) -> Result<WorkflowVersionId, WorkflowVersionStoreError> {
         let canonical = version.version().canonical_bytes()?;
-        for (path, id) in version.version().dependencies() {
+        for (path, id) in version.version().workflow_dependencies() {
             match self.get(id).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {
@@ -218,7 +218,7 @@ mod tests {
             WorkflowVersionStoreError::Decode { .. }
         ));
 
-        let invalid_bytes = br#"{"entrypoint":"missing.fabro","files":{"workflow.fabro":"digraph W {}"},"dependencies":{}}"#;
+        let invalid_bytes = br#"{"entrypoint":"missing.fabro","files":{"workflow.fabro":"digraph W {}"},"workflow_dependencies":{}}"#;
         let invalid = WorkflowVersionId::from(blobs.write(invalid_bytes).await.unwrap());
         assert!(matches!(
             store.get(&invalid).await.unwrap_err(),
