@@ -325,7 +325,7 @@ impl<'a> WorkflowBundler<'a> {
             .parent()
             .unwrap_or_else(|| Path::new("."));
 
-        for image in layer.image_layers() {
+        for image in layer.environment_images() {
             self.collect_environment_dockerfile(files, base_dir, config_path, image)?;
         }
         Ok(())

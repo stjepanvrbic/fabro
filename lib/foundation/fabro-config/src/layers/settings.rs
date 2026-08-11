@@ -110,7 +110,7 @@ impl SettingsLayer {
     /// layer". The dockerfile walkers (run compilation, manifest bundling,
     /// workflow-version validation) all iterate through here so a new
     /// image-bearing location only needs to be added once.
-    pub fn image_layers(&self) -> impl Iterator<Item = &EnvironmentImageLayer> {
+    pub fn environment_images(&self) -> impl Iterator<Item = &EnvironmentImageLayer> {
         self.environments
             .values()
             .filter_map(|environment| environment.image.as_ref())
@@ -122,8 +122,8 @@ impl SettingsLayer {
             )
     }
 
-    /// Mutable variant of [`Self::image_layers`].
-    pub fn image_layers_mut(&mut self) -> impl Iterator<Item = &mut EnvironmentImageLayer> {
+    /// Mutable variant of [`Self::environment_images`].
+    pub fn environment_images_mut(&mut self) -> impl Iterator<Item = &mut EnvironmentImageLayer> {
         self.environments
             .values_mut()
             .filter_map(|environment| environment.image.as_mut())

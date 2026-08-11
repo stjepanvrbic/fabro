@@ -127,7 +127,7 @@ fn validate_config(version: &WorkflowVersion) -> Result<(), WorkflowVersionError
         }
     }
 
-    for image in layer.image_layers() {
+    for image in layer.environment_images() {
         validate_dockerfile(version, &config_path, image)?;
     }
     Ok(())

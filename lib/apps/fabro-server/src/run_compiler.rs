@@ -586,7 +586,7 @@ fn resolve_dockerfiles(
     config_path: &ManifestPath,
     files: &HashMap<ManifestPath, String>,
 ) -> Result<()> {
-    for image in layer.image_layers_mut() {
+    for image in layer.environment_images_mut() {
         resolve_dockerfile(image, config_path, files)?;
     }
     Ok(())
