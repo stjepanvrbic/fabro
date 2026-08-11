@@ -10,7 +10,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use super::cli::CliLayer;
-use super::environment::EnvironmentLayer;
+use super::environment::{EnvironmentImageLayer, EnvironmentLayer};
 use super::llm::LlmLayer;
 use super::maps::MergeMap;
 use super::project::ProjectLayer;
@@ -99,6 +99,40 @@ impl From<WorkflowLayer> for SettingsLayer {
             workflow: Some(workflow),
             ..Self::default()
         }
+    }
+}
+
+impl SettingsLayer {
+    /// Every environment image a settings layer can carry: the image of each
+    /// named `[environments.*]` entry plus the `[run.environment]` image.
+    ///
+    /// This is the single definition of "where images live in a settings
+    /// layer". The dockerfile walkers (run compilation, manifest bundling,
+    /// workflow-version validation) all iterate through here so a new
+    /// image-bearing location only needs to be added once.
+    pub fn image_layers(&self) -> impl Iterator<Item = &EnvironmentImageLayer> {
+        self.environments
+            .values()
+            .filter_map(|environment| environment.image.as_ref())
+            .chain(
+                self.run
+                    .as_ref()
+                    .and_then(|run| run.environment.as_ref())
+                    .and_then(|environment| environment.image.as_ref()),
+            )
+    }
+
+    /// Mutable variant of [`Self::image_layers`].
+    pub fn image_layers_mut(&mut self) -> impl Iterator<Item = &mut EnvironmentImageLayer> {
+        self.environments
+            .values_mut()
+            .filter_map(|environment| environment.image.as_mut())
+            .chain(
+                self.run
+                    .as_mut()
+                    .and_then(|run| run.environment.as_mut())
+                    .and_then(|environment| environment.image.as_mut()),
+            )
     }
 }
 

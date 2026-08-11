@@ -6,13 +6,13 @@ use anyhow::{Context as _, Result, anyhow};
 use fabro_api::types;
 use fabro_config::project::WorkflowLocation;
 use fabro_config::{EnvironmentDockerfileLayer, EnvironmentImageLayer, SettingsLayer};
-use fabro_graphviz::graph::AttrValue;
 use fabro_graphviz::parser;
 use fabro_template::{
-    BundleTemplateStore, FilesystemTemplateStore, RecordingTemplateStore, TemplateContext,
-    TemplateDependencyClosure, TemplateRenderMode, TemplateSource, validate_static_reference,
+    BundleTemplateStore, FilesystemTemplateStore, GraphReference, GraphReferenceError,
+    RecordingTemplateStore, TemplateContext, TemplateDependencyClosure, TemplateRenderMode,
+    TemplateSource, validate_static_reference, visit_graph_references,
 };
-use fabro_types::graph::{AttributeScope, ReferenceKind, reference_kind_for_attribute};
+use fabro_types::graph::ReferenceKind;
 use fabro_types::ManifestPath;
 
 use crate::{manifest_path_from_absolute, normalize_absolute_path};
@@ -132,112 +132,95 @@ impl<'a> WorkflowBundler<'a> {
             .unwrap_or_else(|| Path::new("."));
         let workflow_template_root = manifest_parent_or_dot(&workflow.dot_path)?;
 
-        if let Some(goal_ref) = graph.attrs.get("goal").and_then(AttrValue::as_str) {
-            if goal_ref.starts_with('@') {
-                let bundled = self.collect_bundled_file(
-                    files,
-                    workflow_base_dir,
-                    goal_ref.trim_start_matches('@'),
-                    types::ManifestFileRefType::FileInline,
-                    manifest_attr_reference_kind(AttributeScope::Graph, "goal", goal_ref)?,
-                    Some(workflow.dot_path.clone()),
-                )?;
-                self.collect_bundled_template_includes(files, &bundled, &workflow_template_root)?;
-            } else {
-                self.collect_template_include_files(
-                    files,
-                    TemplateSource::new(
-                        workflow.dot_path.clone(),
-                        workflow_template_root.clone(),
-                        goal_ref.to_owned(),
-                    ),
-                    Some(&workflow.dot_path),
-                )?;
-            }
-        }
+        // Imports and child workflows require a mutable borrow of self, so
+        // collect them during the walk and recurse after the visitor returns.
+        let mut imports = Vec::new();
+        let mut children = Vec::new();
 
-        for node in graph.nodes.values() {
-            if let Some(prompt_ref) = node.attrs.get("prompt").and_then(AttrValue::as_str) {
-                if !prompt_ref.starts_with('@') {
-                    self.collect_template_include_files(
+        visit_graph_references(&graph, |reference| -> Result<()> {
+            match reference {
+                GraphReference::GoalFile { reference } => {
+                    let bundled = self.collect_bundled_file(
                         files,
-                        TemplateSource::new(
-                            workflow.dot_path.clone(),
-                            workflow_template_root.clone(),
-                            prompt_ref.to_owned(),
-                        ),
-                        Some(&workflow.dot_path),
+                        workflow_base_dir,
+                        reference,
+                        types::ManifestFileRefType::FileInline,
+                        ReferenceKind::GraphGoalFile,
+                        Some(workflow.dot_path.clone()),
                     )?;
-                }
-            }
-
-            for (name, value) in &node.attrs {
-                let Some(value) = value.as_str() else {
-                    continue;
-                };
-                let Some(ReferenceKind::FileInline) =
-                    reference_kind_for_attribute(AttributeScope::Node, name, value)
-                else {
-                    continue;
-                };
-                let reference = value.strip_prefix('@').ok_or_else(|| {
-                    anyhow!("file inline reference must start with '@': {name}={value}")
-                })?;
-                let bundled = self.collect_bundled_file(
-                    files,
-                    workflow_base_dir,
-                    reference,
-                    types::ManifestFileRefType::FileInline,
-                    ReferenceKind::FileInline,
-                    Some(workflow.dot_path.clone()),
-                )?;
-
-                if name == "prompt" {
                     self.collect_bundled_template_includes(
                         files,
                         &bundled,
                         &workflow_template_root,
-                    )?;
+                    )
                 }
-            }
-
-            if let Some(import_ref) = node.attrs.get("import").and_then(AttrValue::as_str) {
-                let imported = self.collect_bundled_file(
+                GraphReference::GoalInline { content }
+                | GraphReference::InlinePrompt { content } => self.collect_template_include_files(
                     files,
-                    workflow_base_dir,
-                    import_ref,
-                    types::ManifestFileRefType::Import,
-                    manifest_attr_reference_kind(AttributeScope::Node, "import", import_ref)?,
-                    Some(workflow.dot_path.clone()),
-                )?;
-                let import_key = imported.path.to_string();
-                if visited_imports.insert(import_key) {
-                    let imported_source = std::fs::read_to_string(&imported.absolute_path)
-                        .with_context(|| {
-                            format!("Failed to read {}", imported.absolute_path.display())
-                        })?;
-                    let imported_scan = WorkflowScanInput {
-                        absolute_dot_path: imported.absolute_path,
-                        dot_path:          imported.path,
-                        source:            imported_source,
-                    };
-                    self.collect_workflow_files(&imported_scan, files, visited_imports)?;
+                    TemplateSource::new(
+                        workflow.dot_path.clone(),
+                        workflow_template_root.clone(),
+                        content.to_owned(),
+                    ),
+                    Some(&workflow.dot_path),
+                ),
+                GraphReference::FileInline { key, reference } => {
+                    let bundled = self.collect_bundled_file(
+                        files,
+                        workflow_base_dir,
+                        reference,
+                        types::ManifestFileRefType::FileInline,
+                        ReferenceKind::FileInline,
+                        Some(workflow.dot_path.clone()),
+                    )?;
+                    if key == "prompt" {
+                        self.collect_bundled_template_includes(
+                            files,
+                            &bundled,
+                            &workflow_template_root,
+                        )?;
+                    }
+                    Ok(())
+                }
+                GraphReference::Import { reference } => {
+                    let imported = self.collect_bundled_file(
+                        files,
+                        workflow_base_dir,
+                        reference,
+                        types::ManifestFileRefType::Import,
+                        ReferenceKind::Import,
+                        Some(workflow.dot_path.clone()),
+                    )?;
+                    imports.push(imported);
+                    Ok(())
+                }
+                GraphReference::ChildWorkflow { reference } => {
+                    children.push(reference);
+                    Ok(())
                 }
             }
+        })
+        .map_err(|error| match error {
+            GraphReferenceError::StaticReference(source) => anyhow::Error::new(source),
+            GraphReferenceError::Visit(error) => error,
+        })?;
 
-            if let Some(child_ref) = node
-                .attrs
-                .get("stack.child_workflow")
-                .and_then(AttrValue::as_str)
-            {
-                let kind = manifest_attr_reference_kind(
-                    AttributeScope::Node,
-                    "stack.child_workflow",
-                    child_ref,
-                )?;
-                validate_static_reference(child_ref, kind).map_err(anyhow::Error::new)?;
-                self.collect_workflow_entry(Path::new(child_ref), workflow_base_dir)?;
+        for imported in imports {
+            if visited_imports.insert(imported.path.to_string()) {
+                let imported_source = std::fs::read_to_string(&imported.absolute_path)
+                    .with_context(|| {
+                        format!("Failed to read {}", imported.absolute_path.display())
+                    })?;
+                let imported_scan = WorkflowScanInput {
+                    absolute_dot_path: imported.absolute_path,
+                    dot_path:          imported.path,
+                    source:            imported_source,
+                };
+                self.collect_workflow_files(&imported_scan, files, visited_imports)?;
             }
+        }
+        for child in children {
+            self.collect_workflow_entry(Path::new(child), workflow_base_dir)?;
         }
 
         Ok(())
@@ -342,21 +325,8 @@ impl<'a> WorkflowBundler<'a> {
             .parent()
             .unwrap_or_else(|| Path::new("."));
 
-        for environment in layer.environments.values() {
-            self.collect_environment_dockerfile(
-                files,
-                base_dir,
-                config_path,
-                environment.image.as_ref(),
-            )?;
-        }
-        if let Some(run_environment) = layer.run.as_ref().and_then(|run| run.environment.as_ref()) {
-            self.collect_environment_dockerfile(
-                files,
-                base_dir,
-                config_path,
-                run_environment.image.as_ref(),
-            )?;
+        for image in layer.image_layers() {
+            self.collect_environment_dockerfile(files, base_dir, config_path, image)?;
         }
         Ok(())
     }
@@ -366,10 +336,9 @@ impl<'a> WorkflowBundler<'a> {
         files: &mut HashMap<String, types::ManifestFileEntry>,
         base_dir: &Path,
         config_path: &ManifestPath,
-        image: Option<&EnvironmentImageLayer>,
+        image: &EnvironmentImageLayer,
     ) -> Result<()> {
-        let dockerfile = image.and_then(|image| image.dockerfile.as_ref());
-        let Some(EnvironmentDockerfileLayer::Path { path }) = dockerfile else {
+        let Some(EnvironmentDockerfileLayer::Path { path }) = image.dockerfile.as_ref() else {
             return Ok(());
         };
         self.collect_bundled_file(
@@ -454,15 +423,6 @@ fn manifest_path_is_within_root(path: &ManifestPath, root: &ManifestPath) -> boo
         );
     }
     path.starts_with(root)
-}
-
-fn manifest_attr_reference_kind(
-    scope: AttributeScope,
-    key: &str,
-    value: &str,
-) -> Result<ReferenceKind> {
-    reference_kind_for_attribute(scope, key, value)
-        .ok_or_else(|| anyhow!("unsupported manifest reference attribute: {key}={value}"))
 }
 
 #[cfg(test)]

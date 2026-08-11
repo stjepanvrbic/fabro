@@ -9,13 +9,13 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use fabro_config::{EnvironmentDockerfileLayer, EnvironmentImageLayer, SettingsLayer};
-use fabro_graphviz::graph::Graph;
 use fabro_graphviz::parser;
 use fabro_template::{
-    BundleTemplateStore, StaticReferenceError, TemplateDiscoveryError, TemplateSource,
-    discover_static_dependency_closure, validate_static_reference,
+    BundleTemplateStore, GraphReference, GraphReferenceError, StaticReferenceError,
+    TemplateDiscoveryError, TemplateSource, discover_static_dependency_closure,
+    validate_static_reference, visit_graph_references,
 };
-use fabro_types::graph::{AttributeScope, ReferenceKind, reference_kind_for_attribute};
+use fabro_types::graph::ReferenceKind;
 use fabro_types::{ManifestPath, WorkflowPath, WorkflowPathParseError, WorkflowVersion};
 use thiserror::Error;
 
@@ -127,16 +127,8 @@ fn validate_config(version: &WorkflowVersion) -> Result<(), WorkflowVersionError
         }
     }
 
-    for environment in layer.environments.values() {
-        validate_dockerfile(version, &config_path, environment.image.as_ref())?;
-    }
-    if let Some(image) = layer
-        .run
-        .as_ref()
-        .and_then(|run| run.environment.as_ref())
-        .and_then(|environment| environment.image.as_ref())
-    {
-        validate_dockerfile(version, &config_path, Some(image))?;
+    for image in layer.image_layers() {
+        validate_dockerfile(version, &config_path, image)?;
     }
     Ok(())
 }
@@ -144,11 +136,9 @@ fn validate_config(version: &WorkflowVersion) -> Result<(), WorkflowVersionError
 fn validate_dockerfile(
     version: &WorkflowVersion,
     config_path: &WorkflowPath,
-    image: Option<&EnvironmentImageLayer>,
+    image: &EnvironmentImageLayer,
 ) -> Result<(), WorkflowVersionError> {
-    let Some(EnvironmentDockerfileLayer::Path { path }) =
-        image.and_then(|image| image.dockerfile.as_ref())
-    else {
+    let Some(EnvironmentDockerfileLayer::Path { path }) = image.dockerfile.as_ref() else {
         return Ok(());
     };
     validate_static_reference(path, ReferenceKind::Dockerfile).map_err(|source| {
@@ -187,16 +177,44 @@ fn validate_graph_closure(version: &WorkflowVersion) -> Result<(), WorkflowVersi
             source,
         })?;
 
-        validate_graph_goal(version, &path, &graph, &template_store, &template_root)?;
-        validate_graph_nodes(
-            version,
-            &path,
-            &graph,
-            &template_store,
-            &template_root,
-            &mut queue,
-            &mut child_workflows,
-        )?;
+        visit_graph_references(&graph, |reference| match reference {
+            GraphReference::GoalFile { reference } => {
+                let target = resolve_reference(&path, ReferenceKind::GraphGoalFile, reference)?;
+                let content =
+                    require_file(version, &path, ReferenceKind::GraphGoalFile, target.clone())?;
+                validate_template(&target, content, &template_store, &template_root)
+            }
+            GraphReference::GoalInline { content } | GraphReference::InlinePrompt { content } => {
+                validate_template(&path, content, &template_store, &template_root)
+            }
+            GraphReference::Import { reference } => {
+                let target = resolve_reference(&path, ReferenceKind::Import, reference)?;
+                require_file(version, &path, ReferenceKind::Import, target.clone())?;
+                queue.push_back(target);
+                Ok(())
+            }
+            GraphReference::ChildWorkflow { reference } => {
+                let target = resolve_reference(&path, ReferenceKind::ChildWorkflow, reference)?;
+                child_workflows.insert(target);
+                Ok(())
+            }
+            GraphReference::FileInline { key, reference } => {
+                let target = resolve_reference(&path, ReferenceKind::FileInline, reference)?;
+                let content =
+                    require_file(version, &path, ReferenceKind::FileInline, target.clone())?;
+                if key == "prompt" {
+                    validate_template(&target, content, &template_store, &template_root)?;
+                }
+                Ok(())
+            }
+        })
+        .map_err(|error| match error {
+            GraphReferenceError::StaticReference(source) => WorkflowVersionError::StaticReference {
+                path: path.clone(),
+                source,
+            },
+            GraphReferenceError::Visit(error) => error,
+        })?;
     }
 
     let configured = version
@@ -209,99 +227,6 @@ fn validate_graph_closure(version: &WorkflowVersion) -> Result<(), WorkflowVersi
             missing: child_workflows.difference(&configured).cloned().collect(),
             unused:  configured.difference(&child_workflows).cloned().collect(),
         });
-    }
-    Ok(())
-}
-
-fn validate_graph_goal(
-    version: &WorkflowVersion,
-    graph_path: &WorkflowPath,
-    graph: &Graph,
-    template_store: &BundleTemplateStore,
-    template_root: &ManifestPath,
-) -> Result<(), WorkflowVersionError> {
-    let goal = graph.goal();
-    if goal.is_empty() {
-        return Ok(());
-    }
-    if let Some(reference) = goal.strip_prefix('@') {
-        validate_static_reference(reference, ReferenceKind::GraphGoalFile).map_err(|source| {
-            WorkflowVersionError::StaticReference {
-                path: graph_path.clone(),
-                source,
-            }
-        })?;
-        let target = resolve_reference(graph_path, ReferenceKind::GraphGoalFile, reference)?;
-        let content = require_file(
-            version,
-            graph_path,
-            ReferenceKind::GraphGoalFile,
-            target.clone(),
-        )?;
-        return validate_template(&target, content, template_store, template_root);
-    }
-    validate_template(graph_path, goal, template_store, template_root)
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "Graph validation threads one explicit closure accumulator through node attributes."
-)]
-fn validate_graph_nodes(
-    version: &WorkflowVersion,
-    graph_path: &WorkflowPath,
-    graph: &Graph,
-    template_store: &BundleTemplateStore,
-    template_root: &ManifestPath,
-    imports: &mut VecDeque<WorkflowPath>,
-    child_workflows: &mut BTreeSet<WorkflowPath>,
-) -> Result<(), WorkflowVersionError> {
-    for node in graph.nodes.values() {
-        for (key, value) in &node.attrs {
-            let Some(value) = value.as_str() else {
-                continue;
-            };
-            let Some(kind) = reference_kind_for_attribute(AttributeScope::Node, key, value) else {
-                continue;
-            };
-            validate_static_reference(value, kind).map_err(|source| {
-                WorkflowVersionError::StaticReference {
-                    path: graph_path.clone(),
-                    source,
-                }
-            })?;
-
-            match kind {
-                ReferenceKind::Import => {
-                    let target = resolve_reference(graph_path, kind, value)?;
-                    require_file(version, graph_path, kind, target.clone())?;
-                    imports.push_back(target);
-                }
-                ReferenceKind::ChildWorkflow => {
-                    let target = resolve_reference(graph_path, kind, value)?;
-                    child_workflows.insert(target);
-                }
-                ReferenceKind::FileInline => {
-                    let reference = value.strip_prefix('@').ok_or_else(|| {
-                        WorkflowVersionError::MissingFile {
-                            path: graph_path.clone(),
-                            kind,
-                            target: graph_path.clone(),
-                        }
-                    })?;
-                    let target = resolve_reference(graph_path, kind, reference)?;
-                    let content = require_file(version, graph_path, kind, target.clone())?;
-                    if key == "prompt" {
-                        validate_template(&target, content, template_store, template_root)?;
-                    }
-                }
-                ReferenceKind::Dockerfile | ReferenceKind::GraphGoalFile => {}
-            }
-        }
-
-        if let Some(prompt) = node.prompt().filter(|prompt| !prompt.starts_with('@')) {
-            validate_template(graph_path, prompt, template_store, template_root)?;
-        }
     }
     Ok(())
 }
