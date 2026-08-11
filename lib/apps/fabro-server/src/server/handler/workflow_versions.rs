@@ -64,33 +64,22 @@ fn json_rejection(rejection: JsonRejection) -> ApiError {
             err.body_text(),
             INVALID_VERSION_CODE,
         ),
-        JsonRejection::JsonSyntaxError(err) => {
-            ApiError::with_code(StatusCode::BAD_REQUEST, err.body_text(), INVALID_JSON_CODE)
-        }
-        JsonRejection::MissingJsonContentType(err) => {
-            ApiError::with_code(StatusCode::BAD_REQUEST, err.body_text(), INVALID_JSON_CODE)
-        }
-        JsonRejection::BytesRejection(err) => {
-            ApiError::with_code(StatusCode::BAD_REQUEST, err.body_text(), INVALID_JSON_CODE)
-        }
-        _ => ApiError::with_code(
+        other => ApiError::with_code(
             StatusCode::BAD_REQUEST,
-            "invalid JSON request",
+            other.body_text(),
             INVALID_JSON_CODE,
         ),
     }
 }
 
 fn store_error(err: WorkflowVersionStoreError) -> ApiError {
-    if err.is_dependency_unavailable() {
-        return ApiError::with_code(
+    match err {
+        err @ (WorkflowVersionStoreError::DependencyNotFound { .. }
+        | WorkflowVersionStoreError::DependencyInvalid { .. }) => ApiError::with_code(
             StatusCode::UNPROCESSABLE_ENTITY,
             err.to_string(),
             DEPENDENCY_NOT_FOUND_CODE,
-        );
-    }
-
-    match err {
+        ),
         WorkflowVersionStoreError::InvalidVersion(source) => ApiError::with_code(
             StatusCode::UNPROCESSABLE_ENTITY,
             source.to_string(),

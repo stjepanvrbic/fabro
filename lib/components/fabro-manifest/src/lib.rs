@@ -19,14 +19,13 @@ use fabro_config::{
 };
 use fabro_graphviz::graph::AttrValue;
 use fabro_graphviz::parser;
+use fabro_graphviz::static_reference::ReferenceKind;
 use fabro_types::settings::interp::InterpString;
 use fabro_types::settings::run::{ApprovalMode, ResolvedGoalSource, ResolvedRunGoal, RunMode};
 use fabro_types::{DirtyStatus, GitContext, ManifestPath, WorkflowSettings};
 use fabro_workflow::git::{
     GitSyncStatus, branch_needs_push, head_sha, push_branch_noninteractive, sync_status,
 };
-use fabro_workflow::static_reference::ReferenceKind;
-
 use crate::workflow_bundler::WorkflowBundler;
 
 #[derive(Debug, Default)]

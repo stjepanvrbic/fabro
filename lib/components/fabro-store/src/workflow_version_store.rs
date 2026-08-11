@@ -37,16 +37,6 @@ pub enum WorkflowVersionStoreError {
     },
 }
 
-impl WorkflowVersionStoreError {
-    #[must_use]
-    pub fn is_dependency_unavailable(&self) -> bool {
-        matches!(
-            self,
-            Self::DependencyNotFound { .. } | Self::DependencyInvalid { .. }
-        )
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct WorkflowVersionStore {
     blobs: Arc<BlobStore>,

@@ -58,24 +58,19 @@ impl WorkflowPath {
 
     #[must_use]
     pub fn is_ancestor_of(&self, other: &Self) -> bool {
-        let self_components = self.0.split('/').collect::<Vec<_>>();
-        let other_components = other.0.split('/').collect::<Vec<_>>();
-        self_components.len() < other_components.len()
-            && other_components.starts_with(&self_components)
+        other.0.len() > self.0.len()
+            && other.0.starts_with(self.0.as_str())
+            && other.0.as_bytes()[self.0.len()] == b'/'
     }
 
     pub fn resolve_reference(&self, reference: &str) -> Result<Self, WorkflowPathParseError> {
-        Self::resolve_from(self.parent().as_ref(), reference)
-    }
-
-    pub fn resolve_from_root(reference: &str) -> Result<Self, WorkflowPathParseError> {
-        Self::resolve_from(None, reference)
-    }
-
-    fn resolve_from(base: Option<&Self>, reference: &str) -> Result<Self, WorkflowPathParseError> {
         validate_reference_shape(reference)?;
-        let mut components =
-            base.map_or_else(Vec::new, |path| path.0.split('/').collect::<Vec<_>>());
+        let mut components = self
+            .0
+            .rsplit_once('/')
+            .map_or_else(Vec::new, |(parent, _)| {
+                parent.split('/').collect::<Vec<_>>()
+            });
 
         for component in reference.split('/') {
             match component {
@@ -126,17 +121,16 @@ impl fmt::Display for WorkflowPath {
 
 fn validate(value: &str) -> Result<(), WorkflowPathParseError> {
     validate_reference_shape(value)?;
-    let components = value.split('/').collect::<Vec<_>>();
-    if components
-        .iter()
-        .any(|component| matches!(*component, "." | ".."))
+    if value
+        .split('/')
+        .any(|component| matches!(component, "." | ".."))
     {
         return Err(WorkflowPathParseError::new(
             value,
             "dot segments are not allowed in stored paths",
         ));
     }
-    if components.len() > MAX_WORKFLOW_PATH_COMPONENTS {
+    if value.split('/').count() > MAX_WORKFLOW_PATH_COMPONENTS {
         return Err(WorkflowPathParseError::new(
             value,
             "path has too many components",

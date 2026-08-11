@@ -1,13 +1,13 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::RunBlobId;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
 pub struct WorkflowVersionId(RunBlobId);
 
 impl From<RunBlobId> for WorkflowVersionId {
@@ -28,6 +28,12 @@ impl fmt::Display for WorkflowVersionId {
     }
 }
 
+impl From<WorkflowVersionId> for String {
+    fn from(value: WorkflowVersionId) -> Self {
+        value.to_string()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("workflow version ID must be exactly 64 lowercase hexadecimal characters")]
 pub struct WorkflowVersionIdParseError;
@@ -36,11 +42,9 @@ impl FromStr for WorkflowVersionId {
     type Err = WorkflowVersionIdParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != 64
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
+        // `RunBlobId` enforces length and hex charset but accepts uppercase digits;
+        // the canonical wire form is lowercase only.
+        if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
             return Err(WorkflowVersionIdParseError);
         }
         value
@@ -50,23 +54,11 @@ impl FromStr for WorkflowVersionId {
     }
 }
 
-impl Serialize for WorkflowVersionId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
+impl TryFrom<String> for WorkflowVersionId {
+    type Error = WorkflowVersionIdParseError;
 
-impl<'de> Deserialize<'de> for WorkflowVersionId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(D::Error::custom)
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
     }
 }
 

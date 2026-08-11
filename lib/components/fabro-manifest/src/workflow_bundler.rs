@@ -8,12 +8,12 @@ use fabro_config::project::WorkflowLocation;
 use fabro_config::{EnvironmentDockerfileLayer, EnvironmentImageLayer, SettingsLayer};
 use fabro_graphviz::graph::AttrValue;
 use fabro_graphviz::parser;
+use fabro_graphviz::static_reference::{self, AttributeScope, ReferenceKind};
 use fabro_template::{
     BundleTemplateStore, FilesystemTemplateStore, RecordingTemplateStore, TemplateContext,
     TemplateDependencyClosure, TemplateRenderMode, TemplateSource,
 };
 use fabro_types::ManifestPath;
-use fabro_workflow::static_reference::{self, AttributeScope, ReferenceKind};
 
 use crate::{manifest_path_from_absolute, normalize_absolute_path};
 

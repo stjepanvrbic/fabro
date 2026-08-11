@@ -95,24 +95,6 @@ pub enum WorkflowVersionError {
     },
 }
 
-impl WorkflowVersionError {
-    #[must_use]
-    pub fn missing_dependencies(&self) -> Option<&[WorkflowPath]> {
-        match self {
-            Self::DependencyMismatch { missing, .. } => Some(missing),
-            _ => None,
-        }
-    }
-
-    #[must_use]
-    pub fn unused_dependencies(&self) -> Option<&[WorkflowPath]> {
-        match self {
-            Self::DependencyMismatch { unused, .. } => Some(unused),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct WorkflowVersion {
     entrypoint:   WorkflowPath,
@@ -131,7 +113,8 @@ impl WorkflowVersion {
             files,
             dependencies,
         };
-        version.validate()?;
+        version.validate_structure()?;
+        version.canonical_bytes()?;
         Ok(version)
     }
 
@@ -150,12 +133,12 @@ impl WorkflowVersion {
         &self.dependencies
     }
 
-    pub fn validate(&self) -> Result<(), WorkflowVersionError> {
-        self.canonical_bytes().map(|_| ())
-    }
-
+    /// Serialize to the canonical wire form.
+    ///
+    /// Structural validity is guaranteed by construction (`new` and
+    /// `Deserialize` both validate), so this only serializes and enforces
+    /// the canonical size limit.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, WorkflowVersionError> {
-        self.validate_structure()?;
         let bytes = serde_json::to_vec(self)
             .map_err(|source| WorkflowVersionError::Serialization { source })?;
         if bytes.len() > MAX_WORKFLOW_VERSION_BYTES {
@@ -194,39 +177,19 @@ impl WorkflowVersion {
     }
 
     fn validate_path_collisions(&self) -> Result<(), WorkflowVersionError> {
-        let file_paths = self.files.keys().collect::<Vec<_>>();
-        for (index, first) in file_paths.iter().enumerate() {
-            for second in &file_paths[index + 1..] {
-                if first.is_ancestor_of(second) || second.is_ancestor_of(first) {
+        // Keys are unique within each map, so equality can only collide
+        // across files and dependencies.
+        let paths = self
+            .files
+            .keys()
+            .chain(self.dependencies.keys())
+            .collect::<Vec<_>>();
+        for (index, first) in paths.iter().enumerate() {
+            for second in &paths[index + 1..] {
+                if first == second || first.is_ancestor_of(second) || second.is_ancestor_of(first) {
                     return Err(WorkflowVersionError::PathCollision {
                         first:  (*first).clone(),
                         second: (*second).clone(),
-                    });
-                }
-            }
-        }
-
-        let dependency_paths = self.dependencies.keys().collect::<Vec<_>>();
-        for (index, first) in dependency_paths.iter().enumerate() {
-            for second in &dependency_paths[index + 1..] {
-                if first.is_ancestor_of(second) || second.is_ancestor_of(first) {
-                    return Err(WorkflowVersionError::PathCollision {
-                        first:  (*first).clone(),
-                        second: (*second).clone(),
-                    });
-                }
-            }
-        }
-
-        for file in &file_paths {
-            for dependency in &dependency_paths {
-                if file == dependency
-                    || file.is_ancestor_of(dependency)
-                    || dependency.is_ancestor_of(file)
-                {
-                    return Err(WorkflowVersionError::PathCollision {
-                        first:  (*file).clone(),
-                        second: (*dependency).clone(),
                     });
                 }
             }

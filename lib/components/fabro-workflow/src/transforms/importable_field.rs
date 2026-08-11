@@ -13,8 +13,9 @@
 //! [`super::file_inlining`], where the `FileResolver` and current-dir context
 //! live.
 
+use fabro_graphviz::static_reference::{ReferenceKind, validate_static_reference};
+
 use crate::error::Error;
-use crate::static_reference::{ReferenceKind, validate_static_reference};
 
 /// A field value that is either inline content or an `@path` file import.
 ///

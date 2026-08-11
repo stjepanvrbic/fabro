@@ -1,28 +1,18 @@
-use std::fmt;
-
 use fabro_template::contains_template_syntax;
 use thiserror::Error;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display)]
 pub enum ReferenceKind {
+    #[strum(to_string = "file inline reference")]
     FileInline,
+    #[strum(to_string = "import reference")]
     Import,
+    #[strum(to_string = "child workflow reference")]
     ChildWorkflow,
+    #[strum(to_string = "Dockerfile reference")]
     Dockerfile,
+    #[strum(to_string = "graph goal file reference")]
     GraphGoalFile,
-}
-
-impl fmt::Display for ReferenceKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let label = match self {
-            Self::FileInline => "file inline reference",
-            Self::Import => "import reference",
-            Self::ChildWorkflow => "child workflow reference",
-            Self::Dockerfile => "Dockerfile reference",
-            Self::GraphGoalFile => "graph goal file reference",
-        };
-        f.write_str(label)
-    }
 }
 
 impl ReferenceKind {

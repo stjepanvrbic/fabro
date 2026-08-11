@@ -332,7 +332,6 @@ pub(crate) mod sandbox_git_runtime;
 pub mod services;
 pub(crate) mod stage_execution;
 mod stage_scope;
-pub mod static_reference;
 pub mod steering_hub;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
