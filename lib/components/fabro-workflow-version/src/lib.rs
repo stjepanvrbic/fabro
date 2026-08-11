@@ -1,44 +1,30 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::fmt;
-use std::marker::PhantomData;
+//! Semantic validation for immutable workflow versions.
+//!
+//! The wire type ([`fabro_types::WorkflowVersion`]) enforces structural
+//! invariants at construction. This crate owns the expensive semantic
+//! validation — graph closure, config, and template checks — behind the
+//! [`ValidatedWorkflowVersion`] newtype, and the content-addressed
+//! [`WorkflowVersionStore`] that only accepts and returns validated versions.
+
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use fabro_config::{EnvironmentDockerfileLayer, EnvironmentImageLayer, SettingsLayer};
 use fabro_graphviz::graph::Graph;
 use fabro_graphviz::parser;
-use fabro_graphviz::static_reference::{
-    AttributeScope, ReferenceKind, StaticReferenceError, reference_kind_for_attribute,
-};
 use fabro_template::{
-    BundleTemplateStore, TemplateDiscoveryError, TemplateSource, discover_static_dependency_closure,
+    BundleTemplateStore, StaticReferenceError, TemplateDiscoveryError, TemplateSource,
+    discover_static_dependency_closure, validate_static_reference,
 };
-use fabro_types::{ManifestPath, WorkflowPath, WorkflowPathParseError, WorkflowVersionId};
-use serde::de::{Error as _, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use fabro_types::graph::{AttributeScope, ReferenceKind, reference_kind_for_attribute};
+use fabro_types::{ManifestPath, WorkflowPath, WorkflowPathParseError, WorkflowVersion};
 use thiserror::Error;
 
-pub const MAX_WORKFLOW_VERSION_FILES: usize = 512;
-pub const MAX_WORKFLOW_VERSION_FILE_BYTES: usize = 512 * 1024;
-pub const MAX_WORKFLOW_VERSION_BYTES: usize = 2 * 1024 * 1024;
+mod store;
+
+pub use store::{WorkflowVersionStore, WorkflowVersionStoreError};
 
 #[derive(Debug, Error)]
 pub enum WorkflowVersionError {
-    #[error("workflow version has {actual} files; maximum is {maximum}")]
-    TooManyFiles { actual: usize, maximum: usize },
-    #[error("workflow file `{path}` is {actual} bytes; maximum is {maximum}")]
-    FileTooLarge {
-        path:    WorkflowPath,
-        actual:  usize,
-        maximum: usize,
-    },
-    #[error("workflow version is {actual} canonical bytes; maximum is {maximum}")]
-    VersionTooLarge { actual: usize, maximum: usize },
-    #[error("entrypoint `{path}` is not present in workflow files")]
-    MissingEntrypoint { path: WorkflowPath },
-    #[error("workflow paths collide: `{first}` and `{second}`")]
-    PathCollision {
-        first:  WorkflowPath,
-        second: WorkflowPath,
-    },
     #[error("workflow graph `{path}` is invalid")]
     GraphParse {
         path:   WorkflowPath,
@@ -88,372 +74,295 @@ pub enum WorkflowVersionError {
         missing: Vec<WorkflowPath>,
         unused:  Vec<WorkflowPath>,
     },
-    #[error("failed to serialize canonical workflow version")]
-    Serialization {
-        #[source]
-        source: serde_json::Error,
-    },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct WorkflowVersion {
-    entrypoint:   WorkflowPath,
-    files:        BTreeMap<WorkflowPath, String>,
-    dependencies: BTreeMap<WorkflowPath, WorkflowVersionId>,
+/// A workflow version whose graph, config, and template content passed
+/// semantic validation.
+///
+/// This is the only door: functions that require a semantically valid
+/// version take this type, and the only way to obtain one is [`Self::new`]
+/// (or loading through [`WorkflowVersionStore`], which validates on read).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedWorkflowVersion(WorkflowVersion);
+
+impl ValidatedWorkflowVersion {
+    pub fn new(version: WorkflowVersion) -> Result<Self, WorkflowVersionError> {
+        validate_config(&version)?;
+        validate_graph_closure(&version)?;
+        Ok(Self(version))
+    }
+
+    #[must_use]
+    pub fn version(&self) -> &WorkflowVersion {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_version(self) -> WorkflowVersion {
+        self.0
+    }
 }
 
-impl WorkflowVersion {
-    pub fn new(
-        entrypoint: WorkflowPath,
-        files: BTreeMap<WorkflowPath, String>,
-        dependencies: BTreeMap<WorkflowPath, WorkflowVersionId>,
-    ) -> Result<Self, WorkflowVersionError> {
-        let version = Self {
-            entrypoint,
-            files,
-            dependencies,
-        };
-        version.validate_structure()?;
-        version.canonical_bytes()?;
-        Ok(version)
-    }
+fn validate_config(version: &WorkflowVersion) -> Result<(), WorkflowVersionError> {
+    let config_path =
+        WorkflowPath::new("workflow.toml").expect("the static workflow config path must be valid");
+    let Some(source) = version.files().get(&config_path) else {
+        return Ok(());
+    };
+    let layer = source
+        .parse::<SettingsLayer>()
+        .map_err(|source| WorkflowVersionError::Config { source })?;
 
-    #[must_use]
-    pub fn entrypoint(&self) -> &WorkflowPath {
-        &self.entrypoint
-    }
-
-    #[must_use]
-    pub fn files(&self) -> &BTreeMap<WorkflowPath, String> {
-        &self.files
-    }
-
-    #[must_use]
-    pub fn dependencies(&self) -> &BTreeMap<WorkflowPath, WorkflowVersionId> {
-        &self.dependencies
-    }
-
-    /// Serialize to the canonical wire form.
-    ///
-    /// Structural validity is guaranteed by construction (`new` and
-    /// `Deserialize` both validate), so this only serializes and enforces
-    /// the canonical size limit.
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, WorkflowVersionError> {
-        let bytes = serde_json::to_vec(self)
-            .map_err(|source| WorkflowVersionError::Serialization { source })?;
-        if bytes.len() > MAX_WORKFLOW_VERSION_BYTES {
-            return Err(WorkflowVersionError::VersionTooLarge {
-                actual:  bytes.len(),
-                maximum: MAX_WORKFLOW_VERSION_BYTES,
+    if let Some(configured) = layer
+        .workflow
+        .as_ref()
+        .and_then(|workflow| workflow.graph.as_deref())
+    {
+        let configured = resolve_reference(&config_path, ReferenceKind::FileInline, configured)?;
+        if configured != *version.entrypoint() {
+            return Err(WorkflowVersionError::ConfigEntrypointMismatch {
+                configured,
+                entrypoint: version.entrypoint().clone(),
             });
         }
-        Ok(bytes)
     }
 
-    fn validate_structure(&self) -> Result<(), WorkflowVersionError> {
-        if self.files.len() > MAX_WORKFLOW_VERSION_FILES {
-            return Err(WorkflowVersionError::TooManyFiles {
-                actual:  self.files.len(),
-                maximum: MAX_WORKFLOW_VERSION_FILES,
-            });
+    for environment in layer.environments.values() {
+        validate_dockerfile(version, &config_path, environment.image.as_ref())?;
+    }
+    if let Some(image) = layer
+        .run
+        .as_ref()
+        .and_then(|run| run.environment.as_ref())
+        .and_then(|environment| environment.image.as_ref())
+    {
+        validate_dockerfile(version, &config_path, Some(image))?;
+    }
+    Ok(())
+}
+
+fn validate_dockerfile(
+    version: &WorkflowVersion,
+    config_path: &WorkflowPath,
+    image: Option<&EnvironmentImageLayer>,
+) -> Result<(), WorkflowVersionError> {
+    let Some(EnvironmentDockerfileLayer::Path { path }) =
+        image.and_then(|image| image.dockerfile.as_ref())
+    else {
+        return Ok(());
+    };
+    validate_static_reference(path, ReferenceKind::Dockerfile).map_err(|source| {
+        WorkflowVersionError::StaticReference {
+            path: config_path.clone(),
+            source,
         }
-        for (path, content) in &self.files {
-            if content.len() > MAX_WORKFLOW_VERSION_FILE_BYTES {
-                return Err(WorkflowVersionError::FileTooLarge {
-                    path:    path.clone(),
-                    actual:  content.len(),
-                    maximum: MAX_WORKFLOW_VERSION_FILE_BYTES,
-                });
-            }
+    })?;
+    let target = resolve_reference(config_path, ReferenceKind::Dockerfile, path)?;
+    require_file(version, config_path, ReferenceKind::Dockerfile, target).map(|_| ())
+}
+
+fn validate_graph_closure(version: &WorkflowVersion) -> Result<(), WorkflowVersionError> {
+    let template_store = template_store(version);
+    let template_root = ManifestPath::from_wire(".")
+        .expect("the template package root must be a valid manifest path");
+    let mut queue = VecDeque::from([version.entrypoint().clone()]);
+    let mut visited = BTreeSet::new();
+    let mut child_workflows = BTreeSet::new();
+
+    while let Some(path) = queue.pop_front() {
+        if !visited.insert(path.clone()) {
+            continue;
         }
-        if !self.files.contains_key(&self.entrypoint) {
-            return Err(WorkflowVersionError::MissingEntrypoint {
-                path: self.entrypoint.clone(),
-            });
-        }
-        self.validate_path_collisions()?;
-        self.validate_config()?;
-        self.validate_graph_closure()
+        let source =
+            version
+                .files()
+                .get(&path)
+                .ok_or_else(|| WorkflowVersionError::MissingFile {
+                    path:   path.clone(),
+                    kind:   ReferenceKind::Import,
+                    target: path.clone(),
+                })?;
+        let graph = parser::parse(source).map_err(|source| WorkflowVersionError::GraphParse {
+            path: path.clone(),
+            source,
+        })?;
+
+        validate_graph_goal(version, &path, &graph, &template_store, &template_root)?;
+        validate_graph_nodes(
+            version,
+            &path,
+            &graph,
+            &template_store,
+            &template_root,
+            &mut queue,
+            &mut child_workflows,
+        )?;
     }
 
-    fn validate_path_collisions(&self) -> Result<(), WorkflowVersionError> {
-        // Keys are unique within each map, so equality can only collide
-        // across files and dependencies.
-        let paths = self
-            .files
-            .keys()
-            .chain(self.dependencies.keys())
-            .collect::<Vec<_>>();
-        for (index, first) in paths.iter().enumerate() {
-            for second in &paths[index + 1..] {
-                if first == second || first.is_ancestor_of(second) || second.is_ancestor_of(first) {
-                    return Err(WorkflowVersionError::PathCollision {
-                        first:  (*first).clone(),
-                        second: (*second).clone(),
-                    });
-                }
-            }
-        }
-        Ok(())
+    let configured = version
+        .dependencies()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if child_workflows != configured {
+        return Err(WorkflowVersionError::DependencyMismatch {
+            missing: child_workflows.difference(&configured).cloned().collect(),
+            unused:  configured.difference(&child_workflows).cloned().collect(),
+        });
     }
+    Ok(())
+}
 
-    fn validate_config(&self) -> Result<(), WorkflowVersionError> {
-        let config_path = WorkflowPath::new("workflow.toml")
-            .expect("the static workflow config path must be valid");
-        let Some(source) = self.files.get(&config_path) else {
-            return Ok(());
-        };
-        let layer = source
-            .parse::<SettingsLayer>()
-            .map_err(|source| WorkflowVersionError::Config { source })?;
-
-        if let Some(configured) = layer
-            .workflow
-            .as_ref()
-            .and_then(|workflow| workflow.graph.as_deref())
-        {
-            let configured =
-                Self::resolve_reference(&config_path, ReferenceKind::FileInline, configured)?;
-            if configured != self.entrypoint {
-                return Err(WorkflowVersionError::ConfigEntrypointMismatch {
-                    configured,
-                    entrypoint: self.entrypoint.clone(),
-                });
-            }
-        }
-
-        for environment in layer.environments.values() {
-            self.validate_dockerfile(&config_path, environment.image.as_ref())?;
-        }
-        if let Some(image) = layer
-            .run
-            .as_ref()
-            .and_then(|run| run.environment.as_ref())
-            .and_then(|environment| environment.image.as_ref())
-        {
-            self.validate_dockerfile(&config_path, Some(image))?;
-        }
-        Ok(())
+fn validate_graph_goal(
+    version: &WorkflowVersion,
+    graph_path: &WorkflowPath,
+    graph: &Graph,
+    template_store: &BundleTemplateStore,
+    template_root: &ManifestPath,
+) -> Result<(), WorkflowVersionError> {
+    let goal = graph.goal();
+    if goal.is_empty() {
+        return Ok(());
     }
-
-    fn validate_dockerfile(
-        &self,
-        config_path: &WorkflowPath,
-        image: Option<&EnvironmentImageLayer>,
-    ) -> Result<(), WorkflowVersionError> {
-        let Some(EnvironmentDockerfileLayer::Path { path }) =
-            image.and_then(|image| image.dockerfile.as_ref())
-        else {
-            return Ok(());
-        };
-        ReferenceKind::Dockerfile.validate(path).map_err(|source| {
+    if let Some(reference) = goal.strip_prefix('@') {
+        validate_static_reference(reference, ReferenceKind::GraphGoalFile).map_err(|source| {
             WorkflowVersionError::StaticReference {
-                path: config_path.clone(),
+                path: graph_path.clone(),
                 source,
             }
         })?;
-        let target = Self::resolve_reference(config_path, ReferenceKind::Dockerfile, path)?;
-        self.require_file(config_path, ReferenceKind::Dockerfile, target)
-            .map(|_| ())
+        let target = resolve_reference(graph_path, ReferenceKind::GraphGoalFile, reference)?;
+        let content = require_file(
+            version,
+            graph_path,
+            ReferenceKind::GraphGoalFile,
+            target.clone(),
+        )?;
+        return validate_template(&target, content, template_store, template_root);
     }
+    validate_template(graph_path, goal, template_store, template_root)
+}
 
-    fn validate_graph_closure(&self) -> Result<(), WorkflowVersionError> {
-        let template_store = self.template_store();
-        let template_root = ManifestPath::from_wire(".")
-            .expect("the template package root must be a valid manifest path");
-        let mut queue = VecDeque::from([self.entrypoint.clone()]);
-        let mut visited = BTreeSet::new();
-        let mut child_workflows = BTreeSet::new();
-
-        while let Some(path) = queue.pop_front() {
-            if !visited.insert(path.clone()) {
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Graph validation threads one explicit closure accumulator through node attributes."
+)]
+fn validate_graph_nodes(
+    version: &WorkflowVersion,
+    graph_path: &WorkflowPath,
+    graph: &Graph,
+    template_store: &BundleTemplateStore,
+    template_root: &ManifestPath,
+    imports: &mut VecDeque<WorkflowPath>,
+    child_workflows: &mut BTreeSet<WorkflowPath>,
+) -> Result<(), WorkflowVersionError> {
+    for node in graph.nodes.values() {
+        for (key, value) in &node.attrs {
+            let Some(value) = value.as_str() else {
                 continue;
-            }
-            let source =
-                self.files
-                    .get(&path)
-                    .ok_or_else(|| WorkflowVersionError::MissingFile {
-                        path:   path.clone(),
-                        kind:   ReferenceKind::Import,
-                        target: path.clone(),
-                    })?;
-            let graph =
-                parser::parse(source).map_err(|source| WorkflowVersionError::GraphParse {
-                    path: path.clone(),
-                    source,
-                })?;
-
-            self.validate_graph_goal(&path, &graph, &template_store, &template_root)?;
-            self.validate_graph_nodes(
-                &path,
-                &graph,
-                &template_store,
-                &template_root,
-                &mut queue,
-                &mut child_workflows,
-            )?;
-        }
-
-        let configured = self.dependencies.keys().cloned().collect::<BTreeSet<_>>();
-        if child_workflows != configured {
-            return Err(WorkflowVersionError::DependencyMismatch {
-                missing: child_workflows.difference(&configured).cloned().collect(),
-                unused:  configured.difference(&child_workflows).cloned().collect(),
-            });
-        }
-        Ok(())
-    }
-
-    fn validate_graph_goal(
-        &self,
-        graph_path: &WorkflowPath,
-        graph: &Graph,
-        template_store: &BundleTemplateStore,
-        template_root: &ManifestPath,
-    ) -> Result<(), WorkflowVersionError> {
-        let goal = graph.goal();
-        if goal.is_empty() {
-            return Ok(());
-        }
-        if let Some(reference) = goal.strip_prefix('@') {
-            ReferenceKind::GraphGoalFile
-                .validate(reference)
-                .map_err(|source| WorkflowVersionError::StaticReference {
+            };
+            let Some(kind) = reference_kind_for_attribute(AttributeScope::Node, key, value) else {
+                continue;
+            };
+            validate_static_reference(value, kind).map_err(|source| {
+                WorkflowVersionError::StaticReference {
                     path: graph_path.clone(),
                     source,
-                })?;
-            let target =
-                Self::resolve_reference(graph_path, ReferenceKind::GraphGoalFile, reference)?;
-            let content =
-                self.require_file(graph_path, ReferenceKind::GraphGoalFile, target.clone())?;
-            return Self::validate_template(&target, content, template_store, template_root);
-        }
-        Self::validate_template(graph_path, goal, template_store, template_root)
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "Graph validation threads one explicit closure accumulator through node attributes."
-    )]
-    fn validate_graph_nodes(
-        &self,
-        graph_path: &WorkflowPath,
-        graph: &Graph,
-        template_store: &BundleTemplateStore,
-        template_root: &ManifestPath,
-        imports: &mut VecDeque<WorkflowPath>,
-        child_workflows: &mut BTreeSet<WorkflowPath>,
-    ) -> Result<(), WorkflowVersionError> {
-        for node in graph.nodes.values() {
-            for (key, value) in &node.attrs {
-                let Some(value) = value.as_str() else {
-                    continue;
-                };
-                let Some(kind) = reference_kind_for_attribute(AttributeScope::Node, key, value)
-                else {
-                    continue;
-                };
-                kind.validate(value)
-                    .map_err(|source| WorkflowVersionError::StaticReference {
-                        path: graph_path.clone(),
-                        source,
-                    })?;
-
-                match kind {
-                    ReferenceKind::Import => {
-                        let target = Self::resolve_reference(graph_path, kind, value)?;
-                        self.require_file(graph_path, kind, target.clone())?;
-                        imports.push_back(target);
-                    }
-                    ReferenceKind::ChildWorkflow => {
-                        let target = Self::resolve_reference(graph_path, kind, value)?;
-                        child_workflows.insert(target);
-                    }
-                    ReferenceKind::FileInline => {
-                        let reference = value.strip_prefix('@').ok_or_else(|| {
-                            WorkflowVersionError::MissingFile {
-                                path: graph_path.clone(),
-                                kind,
-                                target: graph_path.clone(),
-                            }
-                        })?;
-                        let target = Self::resolve_reference(graph_path, kind, reference)?;
-                        let content = self.require_file(graph_path, kind, target.clone())?;
-                        if key == "prompt" {
-                            Self::validate_template(
-                                &target,
-                                content,
-                                template_store,
-                                template_root,
-                            )?;
-                        }
-                    }
-                    ReferenceKind::Dockerfile | ReferenceKind::GraphGoalFile => {}
                 }
-            }
+            })?;
 
-            if let Some(prompt) = node.prompt().filter(|prompt| !prompt.starts_with('@')) {
-                Self::validate_template(graph_path, prompt, template_store, template_root)?;
+            match kind {
+                ReferenceKind::Import => {
+                    let target = resolve_reference(graph_path, kind, value)?;
+                    require_file(version, graph_path, kind, target.clone())?;
+                    imports.push_back(target);
+                }
+                ReferenceKind::ChildWorkflow => {
+                    let target = resolve_reference(graph_path, kind, value)?;
+                    child_workflows.insert(target);
+                }
+                ReferenceKind::FileInline => {
+                    let reference = value.strip_prefix('@').ok_or_else(|| {
+                        WorkflowVersionError::MissingFile {
+                            path: graph_path.clone(),
+                            kind,
+                            target: graph_path.clone(),
+                        }
+                    })?;
+                    let target = resolve_reference(graph_path, kind, reference)?;
+                    let content = require_file(version, graph_path, kind, target.clone())?;
+                    if key == "prompt" {
+                        validate_template(&target, content, template_store, template_root)?;
+                    }
+                }
+                ReferenceKind::Dockerfile | ReferenceKind::GraphGoalFile => {}
             }
         }
-        Ok(())
-    }
 
-    fn validate_template(
-        path: &WorkflowPath,
-        content: &str,
-        store: &BundleTemplateStore,
-        root: &ManifestPath,
-    ) -> Result<(), WorkflowVersionError> {
-        let manifest_path = manifest_path(path);
-        discover_static_dependency_closure(
-            [TemplateSource::new(manifest_path, root.clone(), content)],
-            store,
-        )
-        .map_err(|source| WorkflowVersionError::Template {
-            path:   path.clone(),
-            source: Box::new(source),
-        })?;
-        Ok(())
+        if let Some(prompt) = node.prompt().filter(|prompt| !prompt.starts_with('@')) {
+            validate_template(graph_path, prompt, template_store, template_root)?;
+        }
     }
+    Ok(())
+}
 
-    fn template_store(&self) -> BundleTemplateStore {
-        BundleTemplateStore::new(
-            self.files
-                .iter()
-                .map(|(path, content)| (manifest_path(path), content.clone()))
-                .collect::<HashMap<_, _>>(),
-        )
-    }
+fn validate_template(
+    path: &WorkflowPath,
+    content: &str,
+    store: &BundleTemplateStore,
+    root: &ManifestPath,
+) -> Result<(), WorkflowVersionError> {
+    let manifest_path = manifest_path(path);
+    discover_static_dependency_closure(
+        [TemplateSource::new(manifest_path, root.clone(), content)],
+        store,
+    )
+    .map_err(|source| WorkflowVersionError::Template {
+        path:   path.clone(),
+        source: Box::new(source),
+    })?;
+    Ok(())
+}
 
-    fn resolve_reference(
-        path: &WorkflowPath,
-        kind: ReferenceKind,
-        reference: &str,
-    ) -> Result<WorkflowPath, WorkflowVersionError> {
-        path.resolve_reference(reference)
-            .map_err(|source| WorkflowVersionError::InvalidReference {
-                path: path.clone(),
-                kind,
-                reference: reference.to_owned(),
-                source,
-            })
-    }
+fn template_store(version: &WorkflowVersion) -> BundleTemplateStore {
+    BundleTemplateStore::new(
+        version
+            .files()
+            .iter()
+            .map(|(path, content)| (manifest_path(path), content.clone()))
+            .collect::<HashMap<_, _>>(),
+    )
+}
 
-    fn require_file(
-        &self,
-        path: &WorkflowPath,
-        kind: ReferenceKind,
-        target: WorkflowPath,
-    ) -> Result<&str, WorkflowVersionError> {
-        self.files.get(&target).map(String::as_str).ok_or_else(|| {
-            WorkflowVersionError::MissingFile {
-                path: path.clone(),
-                kind,
-                target,
-            }
+fn resolve_reference(
+    path: &WorkflowPath,
+    kind: ReferenceKind,
+    reference: &str,
+) -> Result<WorkflowPath, WorkflowVersionError> {
+    path.resolve_reference(reference)
+        .map_err(|source| WorkflowVersionError::InvalidReference {
+            path: path.clone(),
+            kind,
+            reference: reference.to_owned(),
+            source,
         })
-    }
+}
+
+fn require_file<'version>(
+    version: &'version WorkflowVersion,
+    path: &WorkflowPath,
+    kind: ReferenceKind,
+    target: WorkflowPath,
+) -> Result<&'version str, WorkflowVersionError> {
+    version
+        .files()
+        .get(&target)
+        .map(String::as_str)
+        .ok_or_else(|| WorkflowVersionError::MissingFile {
+            path: path.clone(),
+            kind,
+            target,
+        })
 }
 
 fn manifest_path(path: &WorkflowPath) -> ManifestPath {
@@ -461,76 +370,11 @@ fn manifest_path(path: &WorkflowPath) -> ManifestPath {
         .expect("validated workflow paths must also be valid manifest paths")
 }
 
-impl<'de> Deserialize<'de> for WorkflowVersion {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            entrypoint:   WorkflowPath,
-            files:        UniqueBTreeMap<WorkflowPath, String>,
-            dependencies: UniqueBTreeMap<WorkflowPath, WorkflowVersionId>,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.entrypoint, wire.files.0, wire.dependencies.0).map_err(D::Error::custom)
-    }
-}
-
-struct UniqueBTreeMap<K, V>(BTreeMap<K, V>);
-
-impl<'de, K, V> Deserialize<'de> for UniqueBTreeMap<K, V>
-where
-    K: Deserialize<'de> + Ord + fmt::Display,
-    V: Deserialize<'de>,
-{
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct MapVisitor<K, V>(PhantomData<(K, V)>);
-
-        impl<'de, K, V> Visitor<'de> for MapVisitor<K, V>
-        where
-            K: Deserialize<'de> + Ord + fmt::Display,
-            V: Deserialize<'de>,
-        {
-            type Value = UniqueBTreeMap<K, V>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a map with unique keys")
-            }
-
-            fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut values = BTreeMap::new();
-                while let Some((key, value)) = access.next_entry::<K, V>()? {
-                    if values.insert(key, value).is_some() {
-                        return Err(A::Error::custom("duplicate workflow map key"));
-                    }
-                }
-                Ok(UniqueBTreeMap(values))
-            }
-        }
-
-        deserializer.deserialize_map(MapVisitor(PhantomData))
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use fabro_types::{RunBlobId, WorkflowPath, WorkflowVersion, WorkflowVersionId};
 
-    use fabro_types::{RunBlobId, WorkflowPath, WorkflowVersionId};
-
-    use super::{
-        MAX_WORKFLOW_VERSION_BYTES, MAX_WORKFLOW_VERSION_FILE_BYTES, MAX_WORKFLOW_VERSION_FILES,
-        WorkflowVersion, WorkflowVersionError,
-    };
+    use super::{ValidatedWorkflowVersion, WorkflowVersionError};
 
     fn path(value: &str) -> WorkflowPath {
         value.parse().unwrap()
@@ -543,41 +387,21 @@ mod tests {
     fn version_with(
         files: impl IntoIterator<Item = (&'static str, &'static str)>,
         dependencies: impl IntoIterator<Item = (&'static str, WorkflowVersionId)>,
-    ) -> Result<WorkflowVersion, WorkflowVersionError> {
-        WorkflowVersion::new(
-            path("workflow.fabro"),
-            files
-                .into_iter()
-                .map(|(path_value, content)| (path(path_value), content.to_owned()))
-                .collect(),
-            dependencies
-                .into_iter()
-                .map(|(path_value, id)| (path(path_value), id))
-                .collect(),
+    ) -> Result<ValidatedWorkflowVersion, WorkflowVersionError> {
+        ValidatedWorkflowVersion::new(
+            WorkflowVersion::new(
+                path("workflow.fabro"),
+                files
+                    .into_iter()
+                    .map(|(path_value, content)| (path(path_value), content.to_owned()))
+                    .collect(),
+                dependencies
+                    .into_iter()
+                    .map(|(path_value, id)| (path(path_value), id))
+                    .collect(),
+            )
+            .expect("test fixtures must be structurally valid"),
         )
-    }
-
-    #[test]
-    fn canonical_bytes_have_fixed_field_and_map_order() {
-        let version = WorkflowVersion::new(
-            path("workflow.fabro"),
-            BTreeMap::from([
-                (path("z.txt"), "Z".to_string()),
-                (
-                    path("workflow.fabro"),
-                    "digraph W { start [shape=Mdiamond] exit [shape=Msquare] start -> exit }"
-                        .to_string(),
-                ),
-                (path("a.txt"), "A".to_string()),
-            ]),
-            BTreeMap::new(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            String::from_utf8(version.canonical_bytes().unwrap()).unwrap(),
-            r#"{"entrypoint":"workflow.fabro","files":{"a.txt":"A","workflow.fabro":"digraph W { start [shape=Mdiamond] exit [shape=Msquare] start -> exit }","z.txt":"Z"},"dependencies":{}}"#
-        );
     }
 
     #[test]
@@ -606,7 +430,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(version.dependencies().len(), 1);
+        assert_eq!(version.version().dependencies().len(), 1);
     }
 
     #[test]
@@ -706,121 +530,17 @@ dockerfile = { path = "docker/run.Dockerfile" }
         )
         .unwrap();
 
-        assert_eq!(version.entrypoint(), &path("workflow.fabro"));
-    }
-
-    #[test]
-    fn rejects_path_collisions_and_large_files() {
-        let collision = version_with(
-            [
-                ("workflow.fabro", "digraph W {}"),
-                ("assets", "file"),
-                ("assets/item.txt", "nested"),
-            ],
-            [],
-        )
-        .unwrap_err();
-        assert!(matches!(
-            collision,
-            WorkflowVersionError::PathCollision { .. }
-        ));
-
-        let mut files = BTreeMap::from([(path("workflow.fabro"), "digraph W {}".to_string())]);
-        files.insert(
-            path("large.txt"),
-            "x".repeat(MAX_WORKFLOW_VERSION_FILE_BYTES + 1),
-        );
-        let large =
-            WorkflowVersion::new(path("workflow.fabro"), files, BTreeMap::new()).unwrap_err();
-        assert!(matches!(large, WorkflowVersionError::FileTooLarge { .. }));
-    }
-
-    #[test]
-    fn enforces_file_count_file_size_and_canonical_size_boundaries() {
-        let mut files = BTreeMap::from([(path("workflow.fabro"), "digraph W {}".to_string())]);
-        for index in 0..MAX_WORKFLOW_VERSION_FILES - 1 {
-            files.insert(path(&format!("file-{index:03}.txt")), String::new());
-        }
-        assert!(
-            WorkflowVersion::new(path("workflow.fabro"), files.clone(), BTreeMap::new()).is_ok()
-        );
-        files.insert(path("too-many.txt"), String::new());
-        assert!(matches!(
-            WorkflowVersion::new(path("workflow.fabro"), files, BTreeMap::new()).unwrap_err(),
-            WorkflowVersionError::TooManyFiles { .. }
-        ));
-
-        let exact_file = BTreeMap::from([
-            (path("workflow.fabro"), "digraph W {}".to_string()),
-            (
-                path("payload.txt"),
-                "x".repeat(MAX_WORKFLOW_VERSION_FILE_BYTES),
-            ),
-        ]);
-        assert!(
-            WorkflowVersion::new(path("workflow.fabro"), exact_file.clone(), BTreeMap::new())
-                .is_ok()
-        );
-        let mut oversized_file = exact_file;
-        oversized_file
-            .get_mut(&path("payload.txt"))
-            .unwrap()
-            .push('x');
-        assert!(matches!(
-            WorkflowVersion::new(path("workflow.fabro"), oversized_file, BTreeMap::new())
-                .unwrap_err(),
-            WorkflowVersionError::FileTooLarge { .. }
-        ));
-
-        let mut exact_version_files =
-            BTreeMap::from([(path("workflow.fabro"), "digraph W {}".to_string())]);
-        for index in 0..4 {
-            exact_version_files.insert(path(&format!("payload-{index}.txt")), String::new());
-        }
-        let empty = WorkflowVersion::new(
-            path("workflow.fabro"),
-            exact_version_files.clone(),
-            BTreeMap::new(),
-        )
-        .unwrap();
-        let remaining = MAX_WORKFLOW_VERSION_BYTES - empty.canonical_bytes().unwrap().len();
-        let per_file = remaining / 4;
-        let remainder = remaining % 4;
-        for index in 0..4 {
-            let length = per_file + usize::from(index < remainder);
-            assert!(length <= MAX_WORKFLOW_VERSION_FILE_BYTES);
-            exact_version_files.insert(path(&format!("payload-{index}.txt")), "x".repeat(length));
-        }
-        let exact_version = WorkflowVersion::new(
-            path("workflow.fabro"),
-            exact_version_files.clone(),
-            BTreeMap::new(),
-        )
-        .unwrap();
-        assert_eq!(
-            exact_version.canonical_bytes().unwrap().len(),
-            MAX_WORKFLOW_VERSION_BYTES
-        );
-        exact_version_files
-            .get_mut(&path("payload-0.txt"))
-            .unwrap()
-            .push('x');
-        assert!(matches!(
-            WorkflowVersion::new(path("workflow.fabro"), exact_version_files, BTreeMap::new())
-                .unwrap_err(),
-            WorkflowVersionError::VersionTooLarge { .. }
-        ));
+        assert_eq!(version.version().entrypoint(), &path("workflow.fabro"));
     }
 
     #[test]
     fn rejects_escaping_and_dynamic_template_references() {
-        let escaping = WorkflowVersion::new(
-            path("workflow.fabro"),
-            BTreeMap::from([(
-                path("workflow.fabro"),
-                r#"digraph W { imported [import="../outside.fabro"] }"#.to_string(),
-            )]),
-            BTreeMap::new(),
+        let escaping = version_with(
+            [(
+                "workflow.fabro",
+                r#"digraph W { imported [import="../outside.fabro"] }"#,
+            )],
+            [],
         )
         .unwrap_err();
         assert!(matches!(
@@ -828,33 +548,14 @@ dockerfile = { path = "docker/run.Dockerfile" }
             WorkflowVersionError::InvalidReference { .. }
         ));
 
-        let dynamic = WorkflowVersion::new(
-            path("workflow.fabro"),
-            BTreeMap::from([(
-                path("workflow.fabro"),
-                r#"digraph W { step [prompt="{% include template_name %}"] }"#.to_string(),
-            )]),
-            BTreeMap::new(),
+        let dynamic = version_with(
+            [(
+                "workflow.fabro",
+                r#"digraph W { step [prompt="{% include template_name %}"] }"#,
+            )],
+            [],
         )
         .unwrap_err();
         assert!(matches!(dynamic, WorkflowVersionError::Template { .. }));
-    }
-
-    #[test]
-    fn deserialize_rejects_unknown_fields_and_duplicate_keys() {
-        let unknown = r#"{
-            "entrypoint":"workflow.fabro",
-            "files":{"workflow.fabro":"digraph W {}"},
-            "dependencies":{},
-            "metadata":{}
-        }"#;
-        assert!(serde_json::from_str::<WorkflowVersion>(unknown).is_err());
-
-        let duplicate = r#"{
-            "entrypoint":"workflow.fabro",
-            "files":{"workflow.fabro":"digraph W {}","workflow.fabro":"digraph X {}"},
-            "dependencies":{}
-        }"#;
-        assert!(serde_json::from_str::<WorkflowVersion>(duplicate).is_err());
     }
 }

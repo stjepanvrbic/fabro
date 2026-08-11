@@ -4,8 +4,7 @@ use fabro_api::types::{
     WorkflowPath as ApiWorkflowPath, WorkflowVersion as ApiWorkflowVersion,
     WorkflowVersionId as ApiWorkflowVersionId,
 };
-use fabro_types::{WorkflowPath, WorkflowVersionId};
-use fabro_workflow_version::WorkflowVersion;
+use fabro_types::{WorkflowPath, WorkflowVersion, WorkflowVersionId};
 use serde_json::json;
 
 #[test]

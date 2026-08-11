@@ -74,9 +74,8 @@ pub mod types {
         SubAgentProjection, SubAgentStatus, SystemActorKind, SystemIntegrationStatus,
         SystemIntegrationsResponse, TodoListProjection, TurnId, UpdateVariableRequest,
         UserPrincipal, Variable, VariableListResponse, WorkflowPath, WorkflowSettings,
-        WorkflowVersionId,
+        WorkflowVersion, WorkflowVersionId,
     };
-    pub use fabro_workflow_version::WorkflowVersion;
 
     pub use crate::generated::types::*;
 }

@@ -3,9 +3,11 @@ use std::sync::Arc;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::rejection::JsonRejection;
 use fabro_api::types::{CreateWorkflowVersionResponse, WorkflowVersion};
-use fabro_store::{WorkflowVersionStore, WorkflowVersionStoreError};
+use fabro_types::MAX_WORKFLOW_VERSION_BYTES;
 use fabro_util::error;
-use fabro_workflow_version::MAX_WORKFLOW_VERSION_BYTES;
+use fabro_workflow_version::{
+    ValidatedWorkflowVersion, WorkflowVersionStore, WorkflowVersionStoreError,
+};
 
 use super::super::{
     ApiError, AppState, IntoResponse, Json, RequiredUser, Response, Router, State, StatusCode, post,
@@ -29,6 +31,13 @@ async fn create_workflow_version(
     payload: Result<Json<WorkflowVersion>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(version) = payload.map_err(json_rejection)?;
+    let version = ValidatedWorkflowVersion::new(version).map_err(|err| {
+        ApiError::with_code(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            err.to_string(),
+            INVALID_VERSION_CODE,
+        )
+    })?;
     let blobs = state.store_ref().blobs().await.map_err(|err| {
         tracing::error!(
             error = %err,
@@ -81,6 +90,11 @@ fn store_error(err: WorkflowVersionStoreError) -> ApiError {
             DEPENDENCY_NOT_FOUND_CODE,
         ),
         WorkflowVersionStoreError::InvalidVersion(source) => ApiError::with_code(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            source.to_string(),
+            INVALID_VERSION_CODE,
+        ),
+        WorkflowVersionStoreError::InvalidShape(source) => ApiError::with_code(
             StatusCode::UNPROCESSABLE_ENTITY,
             source.to_string(),
             INVALID_VERSION_CODE,
@@ -307,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn storage_fault_response_is_curated() {
-        let response = store_error(fabro_store::WorkflowVersionStoreError::Storage {
+        let response = store_error(fabro_workflow_version::WorkflowVersionStoreError::Storage {
             source: fabro_store::Error::Other("private persistence detail".to_string()),
         })
         .into_response();

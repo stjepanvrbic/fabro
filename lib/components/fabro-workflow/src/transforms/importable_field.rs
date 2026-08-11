@@ -13,7 +13,8 @@
 //! [`super::file_inlining`], where the `FileResolver` and current-dir context
 //! live.
 
-use fabro_graphviz::static_reference::{ReferenceKind, validate_static_reference};
+use fabro_template::validate_static_reference;
+use fabro_types::graph::ReferenceKind;
 
 use crate::error::Error;
 

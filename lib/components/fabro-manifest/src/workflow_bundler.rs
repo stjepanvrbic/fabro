@@ -8,11 +8,11 @@ use fabro_config::project::WorkflowLocation;
 use fabro_config::{EnvironmentDockerfileLayer, EnvironmentImageLayer, SettingsLayer};
 use fabro_graphviz::graph::AttrValue;
 use fabro_graphviz::parser;
-use fabro_graphviz::static_reference::{self, AttributeScope, ReferenceKind};
 use fabro_template::{
     BundleTemplateStore, FilesystemTemplateStore, RecordingTemplateStore, TemplateContext,
-    TemplateDependencyClosure, TemplateRenderMode, TemplateSource,
+    TemplateDependencyClosure, TemplateRenderMode, TemplateSource, validate_static_reference,
 };
+use fabro_types::graph::{AttributeScope, ReferenceKind, reference_kind_for_attribute};
 use fabro_types::ManifestPath;
 
 use crate::{manifest_path_from_absolute, normalize_absolute_path};
@@ -176,11 +176,7 @@ impl<'a> WorkflowBundler<'a> {
                     continue;
                 };
                 let Some(ReferenceKind::FileInline) =
-                    static_reference::reference_kind_for_attribute(
-                        AttributeScope::Node,
-                        name,
-                        value,
-                    )
+                    reference_kind_for_attribute(AttributeScope::Node, name, value)
                 else {
                     continue;
                 };
@@ -234,13 +230,12 @@ impl<'a> WorkflowBundler<'a> {
                 .get("stack.child_workflow")
                 .and_then(AttrValue::as_str)
             {
-                manifest_attr_reference_kind(
+                let kind = manifest_attr_reference_kind(
                     AttributeScope::Node,
                     "stack.child_workflow",
                     child_ref,
-                )?
-                .validate(child_ref)
-                .map_err(anyhow::Error::new)?;
+                )?;
+                validate_static_reference(child_ref, kind).map_err(anyhow::Error::new)?;
                 self.collect_workflow_entry(Path::new(child_ref), workflow_base_dir)?;
             }
         }
@@ -397,9 +392,7 @@ impl<'a> WorkflowBundler<'a> {
         reference_kind: ReferenceKind,
         from: Option<ManifestPath>,
     ) -> Result<BundledFile> {
-        reference_kind
-            .validate(reference)
-            .map_err(anyhow::Error::new)?;
+        validate_static_reference(reference, reference_kind).map_err(anyhow::Error::new)?;
 
         let absolute_path = normalize_absolute_path(base_dir, reference)
             .ok_or_else(|| anyhow!("unsupported manifest reference: {reference}"))?;
@@ -468,7 +461,7 @@ fn manifest_attr_reference_kind(
     key: &str,
     value: &str,
 ) -> Result<ReferenceKind> {
-    static_reference::reference_kind_for_attribute(scope, key, value)
+    reference_kind_for_attribute(scope, key, value)
         .ok_or_else(|| anyhow!("unsupported manifest reference attribute: {key}={value}"))
 }
 

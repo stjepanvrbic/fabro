@@ -590,6 +590,52 @@ impl Graph {
     }
 }
 
+/// Where an attribute appears in a workflow graph.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttributeScope {
+    Graph,
+    Node,
+    Edge,
+}
+
+/// Kinds of static (non-templated) file references a graph attribute can
+/// carry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display)]
+pub enum ReferenceKind {
+    #[strum(to_string = "file inline reference")]
+    FileInline,
+    #[strum(to_string = "import reference")]
+    Import,
+    #[strum(to_string = "child workflow reference")]
+    ChildWorkflow,
+    #[strum(to_string = "Dockerfile reference")]
+    Dockerfile,
+    #[strum(to_string = "graph goal file reference")]
+    GraphGoalFile,
+}
+
+/// Classify a graph attribute as a static file reference, if it is one.
+#[must_use]
+pub fn reference_kind_for_attribute(
+    scope: AttributeScope,
+    key: &str,
+    value: &str,
+) -> Option<ReferenceKind> {
+    match key {
+        "import" => Some(ReferenceKind::Import),
+        "stack.child_workflow" | "stack.child_dotfile" => Some(ReferenceKind::ChildWorkflow),
+        "goal" if matches!(scope, AttributeScope::Graph) && value.starts_with('@') => {
+            Some(ReferenceKind::GraphGoalFile)
+        }
+        "prompt" | "output_schema"
+            if matches!(scope, AttributeScope::Node) && value.starts_with('@') =>
+        {
+            Some(ReferenceKind::FileInline)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1110,5 +1156,25 @@ mod tests {
             AttrValue::Integer(-1),
         );
         assert_eq!(g.loop_restart_signature_limit(), 3);
+    }
+
+    #[test]
+    fn output_schema_at_value_is_file_inline_reference() {
+        assert_eq!(
+            reference_kind_for_attribute(
+                AttributeScope::Node,
+                "output_schema",
+                "@schemas/result.schema.json",
+            ),
+            Some(ReferenceKind::FileInline),
+        );
+    }
+
+    #[test]
+    fn output_schema_builtin_keyword_is_not_file_inline_reference() {
+        assert_eq!(
+            reference_kind_for_attribute(AttributeScope::Node, "output_schema", "routing"),
+            None,
+        );
     }
 }

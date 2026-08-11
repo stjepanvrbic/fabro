@@ -13,7 +13,6 @@ mod slate;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 mod types;
-mod workflow_version_store;
 
 pub use artifact_store::{
     ArtifactKey, ArtifactStore, NodeArtifact, StageArtifactEntry, retry_storage_segment,
@@ -39,7 +38,6 @@ pub use slate::{
     RefreshToken, RefreshTokenStore, RunCatalogIndex, RunDatabase, Runs, UnreadableRun,
 };
 pub use types::EventPayload;
-pub use workflow_version_store::{WorkflowVersionStore, WorkflowVersionStoreError};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ListRunsQuery {

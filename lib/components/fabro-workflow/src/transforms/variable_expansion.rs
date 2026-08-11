@@ -4,13 +4,11 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use fabro_graphviz::graph::{AttrValue, Graph, Node};
-use fabro_graphviz::static_reference::{
-    AttributeScope, ReferenceKind, reference_kind_for_attribute, validate_static_reference,
-};
 use fabro_template::{
     TemplateContext, TemplateError, TemplateRenderMode, TemplateSource, TemplateSourceOrigin,
-    TemplateStore,
+    TemplateStore, validate_static_reference,
 };
+use fabro_types::graph::{AttributeScope, ReferenceKind, reference_kind_for_attribute};
 use fabro_types::settings::interp::Namespace;
 use fabro_types::settings::{InterpString, ResolveCtx, ResolveError, ResolveErrorKind};
 use fabro_util::error::collect_chain;

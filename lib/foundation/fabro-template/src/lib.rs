@@ -3,6 +3,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use fabro_types::ManifestPath;
+use fabro_types::graph::ReferenceKind;
 use miette::{LabeledSpan, NamedSource, SourceCode, SourceSpan};
 use minijinja::value::{Object, Value};
 use minijinja::{AutoEscape, Environment, ErrorKind, UndefinedBehavior};
@@ -524,6 +525,46 @@ pub fn contains_template_syntax(template: &str) -> bool {
     template.contains("{{") || template.contains("{%") || template.contains("{#")
 }
 
+/// A static file reference that unexpectedly contains template syntax.
+#[derive(Debug, thiserror::Error)]
+#[error("templates are not supported in {kind}s: {value}")]
+pub struct StaticReferenceError {
+    kind:  ReferenceKind,
+    value: String,
+}
+
+impl StaticReferenceError {
+    #[must_use]
+    pub fn new(kind: ReferenceKind, value: impl Into<String>) -> Self {
+        Self {
+            kind,
+            value: value.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> ReferenceKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+/// Reject static file references (imports, child workflows, `@` file values)
+/// that contain template syntax.
+pub fn validate_static_reference(
+    value: &str,
+    kind: ReferenceKind,
+) -> Result<(), StaticReferenceError> {
+    if contains_template_syntax(value) {
+        return Err(StaticReferenceError::new(kind, value));
+    }
+    Ok(())
+}
+
 /// Whether `template` references `name` as a top-level variable.
 ///
 /// Used by the goal self-reference lint: a graph `goal` may not reference
@@ -792,6 +833,27 @@ mod tests {
     use toml::map::Map;
 
     use super::*;
+
+    #[test]
+    fn static_reference_rejects_template_syntax() {
+        let error = validate_static_reference(
+            "@schemas/{{ inputs.schema }}.json",
+            ReferenceKind::FileInline,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ReferenceKind::FileInline);
+        assert_eq!(error.value(), "@schemas/{{ inputs.schema }}.json");
+        assert!(
+            error
+                .to_string()
+                .contains("templates are not supported in file inline references"),
+            "unexpected error: {error}",
+        );
+        assert!(
+            validate_static_reference("@schemas/result.json", ReferenceKind::FileInline).is_ok()
+        );
+    }
 
     fn manifest_path(value: &str) -> ManifestPath {
         ManifestPath::from_wire(value).expect("path should parse")

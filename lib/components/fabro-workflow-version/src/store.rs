@@ -1,15 +1,17 @@
 use std::sync::Arc;
 
-use fabro_types::{WorkflowPath, WorkflowVersionId};
-use fabro_workflow_version::{WorkflowVersion, WorkflowVersionError};
+use fabro_store::BlobStore;
+use fabro_types::{WorkflowPath, WorkflowVersion, WorkflowVersionId, WorkflowVersionShapeError};
 use thiserror::Error;
 
-use crate::BlobStore;
+use crate::{ValidatedWorkflowVersion, WorkflowVersionError};
 
 #[derive(Debug, Error)]
 pub enum WorkflowVersionStoreError {
     #[error(transparent)]
     InvalidVersion(#[from] WorkflowVersionError),
+    #[error(transparent)]
+    InvalidShape(#[from] WorkflowVersionShapeError),
     #[error("workflow-version dependency `{id}` at `{path}` is not stored")]
     DependencyNotFound {
         path: WorkflowPath,
@@ -33,10 +35,15 @@ pub enum WorkflowVersionStoreError {
     #[error("workflow-version storage operation failed")]
     Storage {
         #[source]
-        source: crate::Error,
+        source: fabro_store::Error,
     },
 }
 
+/// Content-addressed storage for validated workflow versions.
+///
+/// `put` only accepts semantically validated versions; `get` re-validates
+/// blobs on read because the blob namespace is shared and storage is not
+/// trusted to contain only canonical versions.
 #[derive(Clone, Debug)]
 pub struct WorkflowVersionStore {
     blobs: Arc<BlobStore>,
@@ -50,10 +57,10 @@ impl WorkflowVersionStore {
 
     pub async fn put(
         &self,
-        version: &WorkflowVersion,
+        version: &ValidatedWorkflowVersion,
     ) -> Result<WorkflowVersionId, WorkflowVersionStoreError> {
-        let canonical = version.canonical_bytes()?;
-        for (path, id) in version.dependencies() {
+        let canonical = version.version().canonical_bytes()?;
+        for (path, id) in version.version().dependencies() {
             match self.get(id).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {
@@ -81,7 +88,7 @@ impl WorkflowVersionStore {
     pub async fn get(
         &self,
         id: &WorkflowVersionId,
-    ) -> Result<Option<WorkflowVersion>, WorkflowVersionStoreError> {
+    ) -> Result<Option<ValidatedWorkflowVersion>, WorkflowVersionStoreError> {
         let blob_id = (*id).into();
         let Some(bytes) = self
             .blobs
@@ -93,11 +100,12 @@ impl WorkflowVersionStore {
         };
         let version = serde_json::from_slice::<WorkflowVersion>(&bytes)
             .map_err(|source| WorkflowVersionStoreError::Decode { id: *id, source })?;
-        let canonical = version.canonical_bytes()?;
+        let validated = ValidatedWorkflowVersion::new(version)?;
+        let canonical = validated.version().canonical_bytes()?;
         if canonical.as_slice() != bytes.as_ref() {
             return Err(WorkflowVersionStoreError::NonCanonical { id: *id });
         }
-        Ok(Some(version))
+        Ok(Some(validated))
     }
 }
 
@@ -107,12 +115,12 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use fabro_types::{WorkflowPath, WorkflowVersionId};
-    use fabro_workflow_version::WorkflowVersion;
+    use fabro_store::{BlobStore, Database};
+    use fabro_types::{WorkflowPath, WorkflowVersion, WorkflowVersionId};
     use object_store::memory::InMemory;
 
     use super::{WorkflowVersionStore, WorkflowVersionStoreError};
-    use crate::Database;
+    use crate::ValidatedWorkflowVersion;
 
     fn path(value: &str) -> WorkflowPath {
         value.parse().unwrap()
@@ -121,16 +129,19 @@ mod tests {
     fn version(
         graph: &str,
         dependencies: BTreeMap<WorkflowPath, WorkflowVersionId>,
-    ) -> WorkflowVersion {
-        WorkflowVersion::new(
-            path("workflow.fabro"),
-            BTreeMap::from([(path("workflow.fabro"), graph.to_owned())]),
-            dependencies,
+    ) -> ValidatedWorkflowVersion {
+        ValidatedWorkflowVersion::new(
+            WorkflowVersion::new(
+                path("workflow.fabro"),
+                BTreeMap::from([(path("workflow.fabro"), graph.to_owned())]),
+                dependencies,
+            )
+            .unwrap(),
         )
         .unwrap()
     }
 
-    async fn stores() -> (Arc<crate::BlobStore>, WorkflowVersionStore) {
+    async fn stores() -> (Arc<BlobStore>, WorkflowVersionStore) {
         let database = Database::new(
             Arc::new(InMemory::new()),
             "",
@@ -146,7 +157,7 @@ mod tests {
     async fn put_get_reuses_exact_blob_digest() {
         let (blobs, store) = stores().await;
         let version = version("digraph W {}", BTreeMap::new());
-        let expected_bytes = version.canonical_bytes().unwrap();
+        let expected_bytes = version.version().canonical_bytes().unwrap();
         let expected_id = WorkflowVersionId::from(fabro_types::RunBlobId::new(&expected_bytes));
 
         let id = store.put(&version).await.unwrap();
@@ -178,14 +189,14 @@ mod tests {
         let (blobs, store) = stores().await;
         let child = version("digraph Child {}", BTreeMap::new());
         let child_id = WorkflowVersionId::from(fabro_types::RunBlobId::new(
-            &child.canonical_bytes().unwrap(),
+            &child.version().canonical_bytes().unwrap(),
         ));
         let root = version(
             r#"digraph Root { child [stack.child_workflow="child.fabro"] }"#,
             BTreeMap::from([(path("child.fabro"), child_id)]),
         );
         let root_id = WorkflowVersionId::from(fabro_types::RunBlobId::new(
-            &root.canonical_bytes().unwrap(),
+            &root.version().canonical_bytes().unwrap(),
         ));
 
         let error = store.put(&root).await.unwrap_err();
@@ -215,7 +226,7 @@ mod tests {
         ));
 
         let version = version("digraph W {}", BTreeMap::new());
-        let pretty = serde_json::to_vec_pretty(&version).unwrap();
+        let pretty = serde_json::to_vec_pretty(version.version()).unwrap();
         let noncanonical = WorkflowVersionId::from(blobs.write(&pretty).await.unwrap());
         assert!(matches!(
             store.get(&noncanonical).await.unwrap_err(),

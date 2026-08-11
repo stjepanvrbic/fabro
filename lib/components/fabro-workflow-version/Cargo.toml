@@ -4,7 +4,7 @@ edition.workspace = true
 version.workspace = true
 publish = false
 license.workspace = true
-description = "Immutable workflow-version package model and validation"
+description = "Semantic validation and storage for immutable workflow versions"
 
 [lib]
 doctest = false
@@ -15,8 +15,13 @@ workspace = true
 [dependencies]
 fabro-config = { path = "../../foundation/fabro-config" }
 fabro-graphviz = { path = "../fabro-graphviz" }
+fabro-store = { path = "../fabro-store" }
 fabro-template = { path = "../../foundation/fabro-template" }
 fabro-types = { path = "../../foundation/fabro-types" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+object_store.workspace = true
+tokio = { workspace = true, features = ["full"] }
