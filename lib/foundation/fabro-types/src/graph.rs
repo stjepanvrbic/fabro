@@ -622,8 +622,10 @@ pub fn reference_kind_for_attribute(
     value: &str,
 ) -> Option<ReferenceKind> {
     match key {
-        "import" => Some(ReferenceKind::Import),
-        "stack.child_workflow" => Some(ReferenceKind::ChildWorkflow),
+        "import" if matches!(scope, AttributeScope::Node) => Some(ReferenceKind::Import),
+        "stack.child_workflow" if matches!(scope, AttributeScope::Node) => {
+            Some(ReferenceKind::ChildWorkflow)
+        }
         "goal" if matches!(scope, AttributeScope::Graph) && value.starts_with('@') => {
             Some(ReferenceKind::GraphGoalFile)
         }
