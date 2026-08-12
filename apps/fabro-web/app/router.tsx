@@ -10,6 +10,7 @@ import * as ChatsLayout from "./routes/chats-layout";
 import * as ChatsNew from "./routes/chats-new";
 import * as ChatsDetail from "./routes/chats-detail";
 import * as AskFabro from "./routes/ask-fabro";
+import * as EditorRoute from "./routes/editor";
 import * as Playground from "./routes/playground";
 import * as Automations from "./routes/automations";
 import * as AutomationsNew from "./routes/automations-new";
@@ -118,6 +119,7 @@ export const routes: RouteObject[] = [
           }),
           route("ask-fabro", AskFabro),
           route("playground", Playground),
+          route("editor", EditorRoute),
           route("automations", Automations),
           route("automations/new", AutomationsNew),
           route("automations/:id/edit", AutomationsEdit),

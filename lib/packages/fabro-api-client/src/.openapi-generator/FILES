@@ -4,6 +4,7 @@ api/automations-api.ts
 api/billing-api.ts
 api/completions-api.ts
 api/discovery-api.ts
+api/editor-api.ts
 api/environments-api.ts
 api/human-in-the-loop-api.ts
 api/insights-api.ts
@@ -125,6 +126,18 @@ models/disk-usage-summary-row.ts
 models/dockerfile-source-inline.ts
 models/dockerfile-source-path.ts
 models/dockerfile-source.ts
+models/editor-diagnostic.ts
+models/editor-push-response.ts
+models/editor-repo-status-response.ts
+models/editor-skill-list-response.ts
+models/editor-skill.ts
+models/editor-validate-request.ts
+models/editor-validate-response.ts
+models/editor-workflow-file-response.ts
+models/editor-workflow-list-response.ts
+models/editor-workflow-save-request.ts
+models/editor-workflow-save-response.ts
+models/editor-workflow-summary.ts
 models/environment-api-dockerfile-source-inline.ts
 models/environment-api-image-settings.ts
 models/environment-image-settings.ts

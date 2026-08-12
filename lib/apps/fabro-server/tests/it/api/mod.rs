@@ -3,6 +3,7 @@ mod automations;
 mod cli_auth_token;
 mod compression;
 mod docs;
+mod editor;
 mod environments;
 mod events;
 mod install;

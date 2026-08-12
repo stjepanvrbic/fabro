@@ -33,6 +33,8 @@ tags:
     description: Internal run details (stages, turns, context, configuration)
   - name: Workflows
     description: Workflow definitions and execution
+  - name: Editor
+    description: Repo-backed workflow file editing (list, read, save as a commit, validate, push, skills)
   - name: Billing
     description: Token counts and billed totals
   - name: Insights
@@ -4972,6 +4974,216 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  # ── Editor ────────────────────────────────────────────────────────────
+
+  /api/v1/editor/workflows:
+    get:
+      operationId: listEditorWorkflows
+      tags: [Editor]
+      summary: List workflows in a repo
+      description: Returns the workflows discovered in the target repo's `.fabro/workflows` directory (workflow.toml-keyed), plus user workflows.
+      parameters:
+        - $ref: "#/components/parameters/EditorRepo"
+      responses:
+        "200":
+          description: Workflows discovered in the repo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EditorWorkflowListResponse"
+        "400":
+          description: Invalid repo path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: The path is not a fabro project (no `.fabro/project.toml`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/editor/workflow:
+    get:
+      operationId: retrieveEditorWorkflowFile
+      tags: [Editor]
+      summary: Read a workflow file
+      description: Returns the source of one workflow file (and its sibling workflow.toml when present) from the target repo, with the base blob oid used for conflict detection on save.
+      parameters:
+        - $ref: "#/components/parameters/EditorRepo"
+        - name: path
+          in: query
+          required: true
+          description: Repo-relative path of the workflow graph file.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Workflow file contents
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EditorWorkflowFileResponse"
+        "400":
+          description: Invalid repo or file path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: File not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    put:
+      operationId: saveEditorWorkflowFile
+      tags: [Editor]
+      summary: Save a workflow file as a commit
+      description: Writes the workflow file (and optionally its sibling workflow.toml), stages exactly those paths, and creates one commit. Refuses with a conflict when the file changed on disk since it was read. Pushing is a separate explicit operation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EditorWorkflowSaveRequest"
+      responses:
+        "200":
+          description: Save result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EditorWorkflowSaveResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: The path is not a fabro project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The file changed on disk since it was read
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/editor/workflow/validate:
+    post:
+      operationId: validateEditorWorkflowSource
+      tags: [Editor]
+      summary: Validate workflow source
+      description: Parses the inline workflow source and runs the lint rules. A parse failure is returned as a single `parse` diagnostic with line and column.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EditorValidateRequest"
+      responses:
+        "200":
+          description: Diagnostics for the source
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EditorValidateResponse"
+
+  /api/v1/editor/repo/status:
+    get:
+      operationId: retrieveEditorRepoStatus
+      tags: [Editor]
+      summary: Repo branch and push status
+      description: Returns the target repo's current branch and how many commits it is ahead of and behind its upstream.
+      parameters:
+        - $ref: "#/components/parameters/EditorRepo"
+      responses:
+        "200":
+          description: Repo status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EditorRepoStatusResponse"
+        "400":
+          description: Invalid repo path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: The path is not a fabro project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/editor/repo/push:
+    post:
+      operationId: pushEditorRepo
+      tags: [Editor]
+      summary: Push the repo's current branch
+      description: Pushes the target repo's current branch to its remote, non-interactively. Never forces.
+      parameters:
+        - $ref: "#/components/parameters/EditorRepo"
+      responses:
+        "200":
+          description: Push result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EditorPushResponse"
+        "400":
+          description: Invalid repo path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: The path is not a fabro project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The push was rejected (no remote, no upstream, or the branch is behind)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/editor/skills:
+    get:
+      operationId: listEditorSkills
+      tags: [Editor]
+      summary: List skills for the skill picker
+      description: Discovers SKILL.md files one level deep under the conventional skill roots (repo `.fabro/skills`, repo `skills`, repo `.claude/skills`, user `~/.claude/skills`, user `~/.agents/skills`).
+      parameters:
+        - $ref: "#/components/parameters/EditorRepo"
+      responses:
+        "200":
+          description: Discovered skills
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EditorSkillListResponse"
+        "400":
+          description: Invalid repo path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: The path is not a fabro project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   # ── Insights ──────────────────────────────────────────────────────────
 
   /api/v1/insights/queries:
@@ -6013,6 +6225,14 @@ components:
       schema:
         type: string
       example: cp-3
+
+    EditorRepo:
+      name: repo
+      in: query
+      required: true
+      description: Absolute path of the target repo on the server host. Must contain `.fabro/project.toml`.
+      schema:
+        type: string
 
     PageLimit:
       name: page[limit]
@@ -9709,6 +9929,237 @@ components:
           type: string
           format: uuid
           description: Server-generated request identifier; matches the x-request-id response header.
+
+    EditorWorkflowSummary:
+      description: One workflow discovered in the target repo or the user workflow directory.
+      type: object
+      required:
+        - name
+        - source
+        - path
+      properties:
+        name:
+          type: string
+          description: Workflow slug (its directory name).
+        goal:
+          type: string
+          nullable: true
+          description: The graph goal, when the workflow file declares one.
+        source:
+          type: string
+          enum: [project, user]
+          description: Whether the workflow lives in the repo or the user workflow directory.
+        path:
+          type: string
+          description: Repo-relative path of the workflow graph file (absolute for user workflows).
+
+    EditorWorkflowListResponse:
+      description: Workflows discovered for the editor.
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/EditorWorkflowSummary"
+
+    EditorWorkflowFileResponse:
+      description: The source of one workflow file, with conflict-detection metadata.
+      type: object
+      required:
+        - path
+        - fabro_source
+        - base_oid
+      properties:
+        path:
+          type: string
+          description: Repo-relative path of the workflow graph file.
+        fabro_source:
+          type: string
+          description: The workflow graph source (Graphviz DOT).
+        toml_path:
+          type: string
+          nullable: true
+          description: Repo-relative path of the sibling workflow.toml, when present.
+        toml_source:
+          type: string
+          nullable: true
+          description: Contents of the sibling workflow.toml, when present.
+        base_oid:
+          type: string
+          description: Git blob oid of the graph file content as read. Send it back on save for conflict detection.
+
+    EditorWorkflowSaveRequest:
+      description: Save a workflow file as one commit.
+      type: object
+      required:
+        - repo
+        - path
+        - fabro_source
+        - commit_message
+      properties:
+        repo:
+          type: string
+          description: Absolute path of the target repo on the server host.
+        path:
+          type: string
+          description: Repo-relative path of the workflow graph file.
+        fabro_source:
+          type: string
+          description: The full workflow graph source to write.
+        toml_source:
+          type: string
+          nullable: true
+          description: When present, the sibling workflow.toml is written with this content and committed alongside.
+        base_oid:
+          type: string
+          nullable: true
+          description: Git blob oid the edit was based on. Omit when creating a new file. A mismatch with the file on disk refuses the save.
+        commit_message:
+          type: string
+          description: The commit message.
+
+    EditorWorkflowSaveResponse:
+      description: Result of a workflow save.
+      type: object
+      required:
+        - committed
+        - commit_sha
+        - base_oid
+      properties:
+        committed:
+          type: boolean
+          description: False when the content was identical and no commit was created.
+        commit_sha:
+          type: string
+          description: The created commit, or HEAD when nothing changed.
+        base_oid:
+          type: string
+          description: Git blob oid of the graph file after the save. Use it as the base for the next save.
+
+    EditorValidateRequest:
+      description: Inline workflow source to validate.
+      type: object
+      required:
+        - source
+      properties:
+        source:
+          type: string
+          description: The workflow graph source (Graphviz DOT).
+
+    EditorDiagnostic:
+      description: One validation diagnostic. A parse failure is reported as rule `parse` with severity `error`.
+      type: object
+      required:
+        - rule
+        - severity
+        - message
+      properties:
+        rule:
+          type: string
+          description: The lint rule name, or `parse` for a parse failure.
+        severity:
+          type: string
+          enum: [error, warning, info]
+        message:
+          type: string
+        node_id:
+          type: string
+          nullable: true
+          description: The node the diagnostic names, when it names one.
+        edge_from:
+          type: string
+          nullable: true
+          description: Source node of the edge the diagnostic names, when it names one.
+        edge_to:
+          type: string
+          nullable: true
+          description: Target node of the edge the diagnostic names, when it names one.
+        line:
+          type: integer
+          nullable: true
+          description: 1-based source line, when known.
+        column:
+          type: integer
+          nullable: true
+          description: 1-based source column, when known.
+
+    EditorValidateResponse:
+      description: Diagnostics for an inline workflow source.
+      type: object
+      required:
+        - diagnostics
+      properties:
+        diagnostics:
+          type: array
+          items:
+            $ref: "#/components/schemas/EditorDiagnostic"
+
+    EditorRepoStatusResponse:
+      description: Branch and push status of the target repo.
+      type: object
+      required:
+        - ahead
+        - behind
+        - has_upstream
+      properties:
+        branch:
+          type: string
+          nullable: true
+          description: The current branch, or null when HEAD is detached.
+        ahead:
+          type: integer
+          description: Commits ahead of the upstream branch. Zero when there is no upstream.
+        behind:
+          type: integer
+          description: Commits behind the upstream branch. Zero when there is no upstream.
+        has_upstream:
+          type: boolean
+          description: Whether the current branch has an upstream to push to.
+
+    EditorPushResponse:
+      description: Result of pushing the repo's current branch.
+      type: object
+      required:
+        - branch
+        - pushed_commits
+      properties:
+        branch:
+          type: string
+          description: The branch that was pushed.
+        pushed_commits:
+          type: integer
+          description: How many commits the push sent.
+
+    EditorSkill:
+      description: One skill available to the skill picker.
+      type: object
+      required:
+        - name
+        - description
+        - source
+      properties:
+        name:
+          type: string
+          description: The skill name, inserted as a slash command.
+        description:
+          type: string
+          description: One-line description from the SKILL.md frontmatter.
+        source:
+          type: string
+          description: The skill root directory the skill was discovered in.
+
+    EditorSkillListResponse:
+      description: Skills discovered for the skill picker.
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/EditorSkill"
 
     ErrorResponse:
       description: Standard error response containing one or more error entries.
