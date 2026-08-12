@@ -51,6 +51,7 @@ async fn stdio_spawn_failure_returns_sandbox_error() {
         cancel_token: CancellationToken::new(),
         on_activity: None,
         live_control: None,
+        on_permission: None,
     })
     .await;
     let Err(error) = result else {
@@ -85,6 +86,7 @@ async fn clean_stdio_exit_after_final_response_completes_turn() {
         cancel_token: CancellationToken::new(),
         on_activity: None,
         live_control: None,
+        on_permission: None,
     })
     .await
     .expect("clean ACP process exit should not preempt final protocol response");
@@ -119,6 +121,7 @@ async fn session_lifecycle_initializes_sends_prompt_and_aggregates_text() {
         cancel_token: CancellationToken::new(),
         on_activity: None,
         live_control: None,
+        on_permission: None,
     })
     .await
     .expect("run ACP turn");
@@ -175,6 +178,7 @@ async fn steering_sends_followup_session_prompt_over_acp() {
                     .enqueue_bounded(SteeringMessage::new("please revise", None), 32);
             }
         })),
+        on_permission: None,
         live_control: Some(AcpLiveControl::new(control_handle)),
     })
     .await
@@ -245,6 +249,7 @@ async fn interrupt_then_steer_sends_cancel_then_followup_session_prompt_over_acp
                 );
             }
         })),
+        on_permission: None,
         live_control: Some(AcpLiveControl::new(control_handle)),
     })
     .await
@@ -313,6 +318,7 @@ async fn inline_interrupt_terminates_agent_that_ignores_cancel() {
                 handle_for_activity.interrupt(None);
             }
         })),
+        on_permission: None,
         live_control: Some(AcpLiveControl::new(control_handle)),
     })
     .await
@@ -359,6 +365,90 @@ async fn permission_request_selects_allow_always() {
         .expect("read permission record");
     assert!(permission.contains(r#""outcome":"selected""#));
     assert!(permission.contains(r#""optionId":"always""#));
+}
+
+#[tokio::test]
+async fn permission_request_routed_to_handler() {
+    let tempdir = tempfile::tempdir().expect("create tempdir");
+    let permission_path = tempdir.path().join("permission.json");
+
+    let handler: fabro_acp::AcpPermissionHandler = Arc::new(|request| {
+        Box::pin(async move {
+            let reject = request
+                .options
+                .iter()
+                .find(|option| option.option_id.to_string() == "reject")
+                .expect("reject option present");
+            fabro_acp::RequestPermissionOutcome::Selected(
+                fabro_acp::SelectedPermissionOutcome::new(reject.option_id.clone()),
+            )
+        })
+    });
+    let result = run_fake_agent_with_permission(
+        tempdir.path(),
+        HashMap::from([
+            ("ACP_MODE".to_string(), "permission".to_string()),
+            (
+                "ACP_PERMISSION".to_string(),
+                permission_path.to_string_lossy().into_owned(),
+            ),
+        ]),
+        Some(ACP_TEST_TIMEOUT_MS),
+        Some(handler),
+    )
+    .await
+    .expect("run ACP turn");
+
+    assert_eq!(result.text, "hello from acp");
+    let permission = read_to_string(permission_path)
+        .await
+        .expect("read permission record");
+    assert!(
+        permission.contains(r#""optionId":"reject""#),
+        "the handler's choice (not auto-approve) must reach the agent: {permission}"
+    );
+}
+
+#[tokio::test]
+async fn pending_permission_pauses_node_timeout() {
+    let tempdir = tempfile::tempdir().expect("create tempdir");
+    let permission_path = tempdir.path().join("permission.json");
+
+    // The handler holds the decision for well past the node timeout; the turn
+    // must still complete because the clock pauses while a human decides.
+    let handler: fabro_acp::AcpPermissionHandler = Arc::new(|request| {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(3500)).await;
+            let once = request
+                .options
+                .iter()
+                .find(|option| option.option_id.to_string() == "once")
+                .expect("allow-once option present");
+            fabro_acp::RequestPermissionOutcome::Selected(
+                fabro_acp::SelectedPermissionOutcome::new(once.option_id.clone()),
+            )
+        })
+    });
+    let result = run_fake_agent_with_permission(
+        tempdir.path(),
+        HashMap::from([
+            ("ACP_MODE".to_string(), "permission".to_string()),
+            (
+                "ACP_PERMISSION".to_string(),
+                permission_path.to_string_lossy().into_owned(),
+            ),
+        ]),
+        Some(1500),
+        Some(handler),
+    )
+    .await
+    .expect("turn must not time out while a permission decision is pending");
+
+    assert_eq!(result.text, "hello from acp");
+    let permission = read_to_string(permission_path)
+        .await
+        .expect("read permission record");
+    assert!(permission.contains(r#""optionId":"once""#), "{permission}");
 }
 
 #[tokio::test]
@@ -657,6 +747,37 @@ async fn run_fake_agent(
     run_fake_agent_with_activity(tempdir, env, timeout_ms, cancel_token, None).await
 }
 
+async fn run_fake_agent_with_permission(
+    tempdir: &Path,
+    mut env: HashMap<String, String>,
+    timeout_ms: Option<u64>,
+    on_permission: Option<fabro_acp::AcpPermissionHandler>,
+) -> Result<AcpRunResult, AcpError> {
+    let script_path = tempdir.join("fake_acp_agent.py");
+    write(&script_path, fake_acp_agent_script())
+        .await
+        .expect("write fake ACP agent");
+    let raw_command = format!("python3 {}", shell_quote(&script_path.to_string_lossy()));
+    let command = AcpProcessSpec::from_command_attr(&raw_command).expect("parse ACP command");
+    let sandbox: Arc<dyn Sandbox> = Arc::new(LocalSandbox::new(tempdir.to_path_buf()));
+    env.entry("LC_ALL".to_string())
+        .or_insert_with(|| "C".to_string());
+
+    run_acp_turn(AcpRunRequest {
+        command,
+        prompt: "hello".to_string(),
+        cwd: tempdir.to_string_lossy().into_owned(),
+        timeout_ms,
+        env,
+        sandbox,
+        cancel_token: CancellationToken::new(),
+        on_activity: None,
+        live_control: None,
+        on_permission,
+    })
+    .await
+}
+
 async fn run_fake_agent_with_activity(
     tempdir: &Path,
     mut env: HashMap<String, String>,
@@ -684,6 +805,7 @@ async fn run_fake_agent_with_activity(
         cancel_token,
         on_activity,
         live_control: None,
+        on_permission: None,
     })
     .await
 }

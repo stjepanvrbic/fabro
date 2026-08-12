@@ -342,6 +342,7 @@ impl AgentQuestionRuntime for WorkflowAgentQuestionRuntime {
                             .original_question
                             .clone(),
                         answers:           Vec::new(),
+                        keys:              Vec::new(),
                         status:            AgentQuestionAnswerStatus::Interrupted,
                     }
                 })
@@ -472,10 +473,20 @@ fn answer_from_submission(
     } else {
         Vec::new()
     };
+    let keys = if status == AgentQuestionAnswerStatus::Answered {
+        match &submission.answer.value {
+            AnswerValue::Selected(key) => vec![key.clone()],
+            AnswerValue::MultiSelected(keys) => keys.clone(),
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
     AgentQuestionAnswer {
         original_id: agent_question.original_id.clone(),
         original_question: agent_question.original_question.clone(),
         answers,
+        keys,
         status,
     }
 }

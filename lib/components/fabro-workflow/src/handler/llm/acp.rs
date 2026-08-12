@@ -7,16 +7,19 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use fabro_acp::{
-    AcpCommandError, AcpControlHandle, AcpError, AcpLiveControl, AcpProcessSpec, AcpRunRequest,
-    render_stop_reason,
+    AcpCommandError, AcpControlHandle, AcpError, AcpLiveControl, AcpPermissionHandler,
+    AcpProcessSpec, AcpRunRequest, PermissionOptionKind, RequestPermissionOutcome,
+    RequestPermissionRequest, SelectedPermissionOutcome, render_stop_reason,
 };
 use fabro_agent::{
-    AgentEvent, RefreshOutcome, Sandbox, StaticEnvProvider, SteeringItem, ToolEnvProvider,
+    AgentEvent, AgentQuestion, AgentQuestionAnswerStatus, AgentQuestionRuntime, RefreshOutcome,
+    Sandbox, StaticEnvProvider, SteeringItem, ToolEnvProvider,
 };
 use fabro_graphviz::graph::Node;
 use fabro_static::EnvVars;
 use fabro_types::{
-    AgentBackend, Principal, SessionCapability, StageId, StageTiming, SteeringMessage,
+    AgentBackend, InterviewOption, Principal, QuestionType, SessionCapability, StageId,
+    StageTiming, SteeringMessage,
 };
 use fabro_util::time::elapsed_ms;
 use tokio::task::JoinHandle;
@@ -201,6 +204,7 @@ impl AgentAcpBackend {
         stage_scope: &StageScope,
         sandbox: &Arc<dyn Sandbox>,
         cancel_token: CancellationToken,
+        on_permission: Option<AcpPermissionHandler>,
     ) -> Result<CodergenResult, Error> {
         let process_spec = resolve_acp_process_spec(node)?;
         let config_name = process_spec.name().map(str::to_string);
@@ -344,6 +348,7 @@ impl AgentAcpBackend {
                 on_natural_completion,
                 on_steer_prompt,
             }),
+            on_permission,
         })
         .await
         {
@@ -526,6 +531,10 @@ impl CodergenBackend for AgentAcpBackend {
             ));
         }
         let stage_scope = StageScope::for_handler(request.context, &request.node.id);
+        let on_permission = request
+            .agent_tool_runtime
+            .question_runtime()
+            .map(|runtime| permission_handler(runtime, request.cancel_token.clone()));
         self.run_turn(
             request.node,
             request.prompt.to_string(),
@@ -533,6 +542,7 @@ impl CodergenBackend for AgentAcpBackend {
             &stage_scope,
             request.sandbox,
             request.cancel_token,
+            on_permission,
         )
         .await
     }
@@ -545,6 +555,99 @@ impl CodergenBackend for AgentAcpBackend {
 
     fn node_timeout_policy(&self, _node: &Node) -> NodeTimeoutPolicy {
         NodeTimeoutPolicy::HandlerManaged
+    }
+}
+
+/// Routes one `session/request_permission` through the run's interview
+/// runtime: the request becomes a pending interview (blocking the stage and
+/// pausing its timeout budget), and the operator's chosen option returns to
+/// the agent. Freeform text is allowed; it lands in the interview record. An
+/// unanswered or interrupted interview maps to `Cancelled`, which the agent
+/// treats as a denial.
+fn permission_handler(
+    runtime: Arc<dyn AgentQuestionRuntime>,
+    cancel_token: CancellationToken,
+) -> AcpPermissionHandler {
+    Arc::new(move |request: RequestPermissionRequest| {
+        let runtime = Arc::clone(&runtime);
+        let cancel_token = cancel_token.clone();
+        Box::pin(async move {
+            let question = permission_question(&request);
+            let tool_call_id = request.tool_call.tool_call_id.to_string();
+            match runtime
+                .ask_questions(&tool_call_id, vec![question], cancel_token)
+                .await
+            {
+                Ok(answers) => permission_outcome(&request, answers.first()),
+                Err(error) => {
+                    tracing::warn!(%error, "permission interview failed; cancelling request");
+                    RequestPermissionOutcome::Cancelled
+                }
+            }
+        })
+    })
+}
+
+fn permission_question(request: &RequestPermissionRequest) -> AgentQuestion {
+    let text = request
+        .tool_call
+        .fields
+        .title
+        .clone()
+        .unwrap_or_else(|| "The agent requests permission".to_string());
+    AgentQuestion {
+        original_id: None,
+        original_question: text.clone(),
+        header: Some("Permission request".to_string()),
+        text,
+        question_type: QuestionType::MultipleChoice,
+        options: request
+            .options
+            .iter()
+            .map(|option| InterviewOption {
+                key:         option.option_id.to_string(),
+                label:       option.name.clone(),
+                description: Some(permission_kind_label(option.kind).to_string()),
+                preview:     None,
+            })
+            .collect(),
+        allow_freeform: true,
+    }
+}
+
+fn permission_kind_label(kind: PermissionOptionKind) -> &'static str {
+    match kind {
+        PermissionOptionKind::AllowOnce => "allow once",
+        PermissionOptionKind::AllowAlways => "allow always",
+        PermissionOptionKind::RejectOnce => "reject once",
+        PermissionOptionKind::RejectAlways => "reject always",
+        _ => "option",
+    }
+}
+
+fn permission_outcome(
+    request: &RequestPermissionRequest,
+    answer: Option<&fabro_agent::AgentQuestionAnswer>,
+) -> RequestPermissionOutcome {
+    let Some(answer) = answer else {
+        return RequestPermissionOutcome::Cancelled;
+    };
+    if answer.status != AgentQuestionAnswerStatus::Answered {
+        return RequestPermissionOutcome::Cancelled;
+    }
+    let Some(key) = answer.keys.first() else {
+        // Freeform text without a selected option chooses nothing; the agent
+        // sees a cancelled (denied) request rather than a guessed option.
+        return RequestPermissionOutcome::Cancelled;
+    };
+    let valid = request
+        .options
+        .iter()
+        .any(|option| option.option_id.to_string() == *key);
+    if valid {
+        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(key.clone()))
+    } else {
+        RequestPermissionOutcome::Cancelled
     }
 }
 
@@ -610,8 +713,11 @@ mod tests {
     use std::time::Duration;
 
     use fabro_acp::test_support::fake_acp_agent_script;
-    use fabro_acp::{AcpError, AcpProcessExit};
-    use fabro_agent::{LocalSandbox, RefreshOutcome, Sandbox, shell_quote};
+    use fabro_acp::{AcpError, AcpProcessExit, RequestPermissionOutcome, RequestPermissionRequest};
+    use fabro_agent::{
+        AgentQuestionAnswer, AgentQuestionAnswerStatus, LocalSandbox, RefreshOutcome, Sandbox,
+        shell_quote,
+    };
     use fabro_graphviz::graph::{AttrValue, Node};
     use fabro_sandbox::test_support::MockSandbox;
     use fabro_types::{CommandTermination, EventBody, ExecOutputTail};
@@ -619,6 +725,7 @@ mod tests {
 
     use super::{
         AgentAcpBackend, acp_error_to_workflow, parse_refresh_enabled, parse_refresh_interval,
+        permission_outcome, permission_question,
     };
     use crate::context::Context;
     use crate::event::Emitter;
@@ -1211,5 +1318,86 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success());
+    }
+
+    fn permission_request() -> RequestPermissionRequest {
+        serde_json::from_value(serde_json::json!({
+            "sessionId": "sess-1",
+            "toolCall": {"toolCallId": "tool-1", "title": "Write /tmp/x.txt"},
+            "options": [
+                {"optionId": "grant", "name": "Grant", "kind": "allow_once"},
+                {"optionId": "deny", "name": "Keep denied", "kind": "reject_once"}
+            ]
+        }))
+        .expect("valid permission request")
+    }
+
+    fn answer(status: AgentQuestionAnswerStatus, keys: &[&str]) -> AgentQuestionAnswer {
+        AgentQuestionAnswer {
+            original_id: None,
+            original_question: "q".to_string(),
+            answers: keys.iter().map(|k| (*k).to_string()).collect(),
+            keys: keys.iter().map(|k| (*k).to_string()).collect(),
+            status,
+        }
+    }
+
+    #[test]
+    fn permission_question_maps_options_and_allows_freeform() {
+        let question = permission_question(&permission_request());
+        assert_eq!(question.text, "Write /tmp/x.txt");
+        assert!(question.allow_freeform);
+        let keys: Vec<_> = question.options.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(keys, ["grant", "deny"]);
+        assert_eq!(question.options[0].label, "Grant");
+        assert_eq!(
+            question.options[0].description.as_deref(),
+            Some("allow once")
+        );
+    }
+
+    #[test]
+    fn permission_outcome_selects_the_chosen_option() {
+        let request = permission_request();
+        let outcome = permission_outcome(
+            &request,
+            Some(&answer(AgentQuestionAnswerStatus::Answered, &["grant"])),
+        );
+        match outcome {
+            RequestPermissionOutcome::Selected(selected) => {
+                assert_eq!(selected.option_id.to_string(), "grant");
+            }
+            other => panic!("expected selected outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn permission_outcome_cancels_on_no_answer_unknown_key_or_interrupt() {
+        let request = permission_request();
+        assert!(matches!(
+            permission_outcome(&request, None),
+            RequestPermissionOutcome::Cancelled
+        ));
+        assert!(matches!(
+            permission_outcome(
+                &request,
+                Some(&answer(AgentQuestionAnswerStatus::Answered, &["bogus"]))
+            ),
+            RequestPermissionOutcome::Cancelled
+        ));
+        assert!(matches!(
+            permission_outcome(
+                &request,
+                Some(&answer(AgentQuestionAnswerStatus::Interrupted, &["grant"]))
+            ),
+            RequestPermissionOutcome::Cancelled
+        ));
+        assert!(matches!(
+            permission_outcome(
+                &request,
+                Some(&answer(AgentQuestionAnswerStatus::Answered, &[]))
+            ),
+            RequestPermissionOutcome::Cancelled
+        ));
     }
 }

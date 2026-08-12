@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,9 +13,10 @@ use agent_client_protocol::{ActiveSession, Agent, Client, Error as ProtocolError
 use fabro_sandbox::Sandbox;
 use fabro_types::{Principal, SteeringMessage};
 use fabro_util::time::elapsed_ms;
+use futures::future::BoxFuture;
 use tokio::sync::Notify;
 use tokio::sync::futures::Notified;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::command::AcpProcessSpec;
@@ -23,6 +25,12 @@ use crate::transport::{SandboxAcpTransport, TransportState};
 
 pub type AcpNaturalCompletionCallback = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type AcpSteerPromptCallback = Arc<dyn Fn(String, Option<Principal>) + Send + Sync>;
+/// Decides one `session/request_permission` from the agent. While a handler
+/// call is in flight the node-timeout clock is paused — time waiting on a
+/// human never consumes the node's budget.
+pub type AcpPermissionHandler = Arc<
+    dyn Fn(RequestPermissionRequest) -> BoxFuture<'static, RequestPermissionOutcome> + Send + Sync,
+>;
 
 const CANCEL_GRACE_PERIOD: Duration = Duration::from_millis(500);
 
@@ -159,15 +167,18 @@ impl AcpLiveControl {
 }
 
 pub struct AcpRunRequest {
-    pub command:      AcpProcessSpec,
-    pub prompt:       String,
-    pub cwd:          String,
-    pub timeout_ms:   Option<u64>,
-    pub env:          HashMap<String, String>,
-    pub sandbox:      Arc<dyn Sandbox>,
-    pub cancel_token: CancellationToken,
-    pub on_activity:  Option<Arc<dyn Fn() + Send + Sync>>,
-    pub live_control: Option<AcpLiveControl>,
+    pub command:       AcpProcessSpec,
+    pub prompt:        String,
+    pub cwd:           String,
+    pub timeout_ms:    Option<u64>,
+    pub env:           HashMap<String, String>,
+    pub sandbox:       Arc<dyn Sandbox>,
+    pub cancel_token:  CancellationToken,
+    pub on_activity:   Option<Arc<dyn Fn() + Send + Sync>>,
+    pub live_control:  Option<AcpLiveControl>,
+    /// Routes `session/request_permission` to a human decision. `None` keeps
+    /// the historical auto-approve (most permissive option wins).
+    pub on_permission: Option<AcpPermissionHandler>,
 }
 
 #[derive(Debug)]
@@ -189,6 +200,7 @@ pub async fn run_acp_turn(request: AcpRunRequest) -> Result<AcpRunResult, AcpErr
         cancel_token,
         on_activity,
         live_control,
+        on_permission,
     } = request;
     let live_control = live_control.unwrap_or_default();
     let start = std::time::Instant::now();
@@ -196,6 +208,8 @@ pub async fn run_acp_turn(request: AcpRunRequest) -> Result<AcpRunResult, AcpErr
     let read_cancel_token = cancel_token.clone();
     let run_cancel_token = cancel_token.clone();
     let permission_cancel_token = cancel_token.clone();
+    let pending_permissions = Arc::new(AtomicUsize::new(0));
+    let pending_for_handler = Arc::clone(&pending_permissions);
     let transport = SandboxAcpTransport::new(command, cwd.clone(), env, sandbox, state.clone());
 
     let run = Client
@@ -205,6 +219,9 @@ pub async fn run_acp_turn(request: AcpRunRequest) -> Result<AcpRunResult, AcpErr
             async move |request: RequestPermissionRequest, responder, _connection| {
                 let outcome = if permission_cancel_token.is_cancelled() {
                     RequestPermissionOutcome::Cancelled
+                } else if let Some(handler) = on_permission.as_ref() {
+                    let _pending = PendingPermission::new(&pending_for_handler);
+                    handler(request).await
                 } else {
                     select_permission_outcome(&request)
                 };
@@ -238,7 +255,14 @@ pub async fn run_acp_turn(request: AcpRunRequest) -> Result<AcpRunResult, AcpErr
     let run_outcome = async {
         match timeout_ms {
             Some(timeout_ms) => {
-                if let Ok(result) = timeout(Duration::from_millis(timeout_ms), run).await {
+                tokio::pin!(run);
+                if let Some(result) = pausable_timeout(
+                    Duration::from_millis(timeout_ms),
+                    run.as_mut(),
+                    &pending_permissions,
+                )
+                .await
+                {
                     Ok(result)
                 } else {
                     state.terminate().await?;
@@ -308,6 +332,50 @@ pub async fn run_acp_turn(request: AcpRunRequest) -> Result<AcpRunResult, AcpErr
 
 fn map_protocol_error(error: ProtocolError) -> AcpError {
     AcpError::Protocol(error)
+}
+
+/// Guard counting one in-flight permission decision; the node-timeout clock
+/// only ticks while the count is zero.
+struct PendingPermission<'a>(&'a AtomicUsize);
+
+impl<'a> PendingPermission<'a> {
+    fn new(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Drop for PendingPermission<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Like `tokio::time::timeout`, but the clock pauses while a permission
+/// decision is pending — time spent waiting on a human never consumes the
+/// node's budget. Returns `Some(output)` on completion, `None` on timeout.
+/// Granularity is one tick (250 ms), far below any real node timeout.
+async fn pausable_timeout<F: std::future::Future>(
+    duration: Duration,
+    mut fut: std::pin::Pin<&mut F>,
+    pending: &AtomicUsize,
+) -> Option<F::Output> {
+    const TICK: Duration = Duration::from_millis(250);
+    let mut remaining = duration;
+    loop {
+        let tick = remaining.min(TICK);
+        tokio::select! {
+            output = &mut fut => return Some(output),
+            () = sleep(tick) => {
+                if pending.load(Ordering::SeqCst) == 0 {
+                    remaining = remaining.saturating_sub(tick);
+                    if remaining.is_zero() {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn select_permission_outcome(request: &RequestPermissionRequest) -> RequestPermissionOutcome {

@@ -663,6 +663,7 @@ mod tests {
                     original_id:       question.original_id,
                     original_question: question.original_question,
                     answers:           vec!["Ship".to_string()],
+                    keys:              Vec::new(),
                     status:            AgentQuestionAnswerStatus::Answered,
                 })
                 .collect())

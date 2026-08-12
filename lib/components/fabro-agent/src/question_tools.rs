@@ -90,6 +90,9 @@ pub struct AgentQuestionAnswer {
     pub original_id:       Option<String>,
     pub original_question: String,
     pub answers:           Vec<String>,
+    /// Selected option keys, when the answer picked options (empty for
+    /// freeform text and non-answered statuses).
+    pub keys:              Vec<String>,
     pub status:            AgentQuestionAnswerStatus,
 }
 
@@ -662,6 +665,7 @@ mod tests {
             original_id:       original_id.map(str::to_string),
             original_question: question.to_string(),
             answers:           answers.iter().map(|value| (*value).to_string()).collect(),
+            keys:              Vec::new(),
             status:            AgentQuestionAnswerStatus::Answered,
         }
     }
