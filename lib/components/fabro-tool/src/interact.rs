@@ -399,6 +399,7 @@ fn answer_to_submit_request(answer: Value) -> ToolResult<types::SubmitAnswerRequ
                 Ok(types::SubmitAnswerSelectedRequest {
                     kind: types::SubmitAnswerSelectedRequestKind::Selected,
                     option_key,
+                    text: None,
                 }
                 .into())
             } else if let Some(options) = object.remove("options") {

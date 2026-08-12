@@ -40,6 +40,21 @@ provider and route a workflow's model to it.
 Note: the running server's process title is `fabro server tcp:<addr>` (argv is
 rewritten), so match that — not `fabro server start` — when killing it.
 
+## Known upstream test flake
+
+Three `fabro-server` tests (`serve::tests::build_object_store_*`,
+`serve::tests::build_slatedb_store_*`,
+`install::tests::write_artifact_store_metadata_*`) fail only in the full
+parallel run: `install.rs` sets the process-global
+`FABRO_TEST_IN_MEMORY_STORE` env var mid-suite and concurrent storage tests
+observe it. Present on unmodified upstream (verified at 3226d845 with the
+fork diff stashed); each passes alone and with `--test-threads=1`. Upstream
+candidate fix: scope the var with a guard or mark those tests serial.
+
+Similarly, 14 `apps/fabro-web` bun tests (build-version guard, import-chunk,
+run-files rendering) fail on this box identically with and without the fork
+diff (verified with the diff stashed); the fork's own suites are green.
+
 ## Rebasing onto an upstream release
 
 The fork tracks upstream tagged releases at our choosing (no standing

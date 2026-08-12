@@ -23,6 +23,10 @@ export interface SubmitAnswerSelectedRequest {
      * Key of the selected option.
      */
     'option_key': string;
+    /**
+     * Optional freeform message accompanying the selected option. Human gates record it in the run context alongside the verdict.
+     */
+    'text'?: string;
 }
 
 export const SubmitAnswerSelectedRequestKindEnum = {

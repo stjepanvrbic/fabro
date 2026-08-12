@@ -3867,7 +3867,11 @@ fn answer_from_request(
                 .find(|option| option.key == key)
                 .cloned();
             match option {
-                Some(option) => Ok(Answer::selected(key, option)),
+                Some(option) => {
+                    let mut answer = Answer::selected(key, option);
+                    answer.text = req.text.filter(|text| !text.trim().is_empty());
+                    Ok(answer)
+                }
                 None => Err(ApiError::bad_request("Invalid option key.").into_response()),
             }
         }

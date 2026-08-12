@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use fabro_acp::{
-    AcpCommandError, AcpControlHandle, AcpError, AcpLiveControl, AcpPermissionHandler,
-    AcpProcessSpec, AcpRunRequest, PermissionOptionKind, RequestPermissionOutcome,
-    RequestPermissionRequest, SelectedPermissionOutcome, render_stop_reason,
+    AcpAskHandler, AcpCommandError, AcpControlHandle, AcpError, AcpLiveControl,
+    AcpPermissionHandler, AcpProcessSpec, AcpRunRequest, PermissionOptionKind,
+    RequestPermissionOutcome, RequestPermissionRequest, SelectedPermissionOutcome,
+    render_stop_reason,
 };
 use fabro_agent::{
     AgentEvent, AgentQuestion, AgentQuestionAnswerStatus, AgentQuestionRuntime, RefreshOutcome,
@@ -205,6 +206,7 @@ impl AgentAcpBackend {
         sandbox: &Arc<dyn Sandbox>,
         cancel_token: CancellationToken,
         on_permission: Option<AcpPermissionHandler>,
+        on_ask: Option<AcpAskHandler>,
     ) -> Result<CodergenResult, Error> {
         let process_spec = resolve_acp_process_spec(node)?;
         let config_name = process_spec.name().map(str::to_string);
@@ -349,6 +351,7 @@ impl AgentAcpBackend {
                 on_steer_prompt,
             }),
             on_permission,
+            on_ask,
         })
         .await
         {
@@ -531,10 +534,12 @@ impl CodergenBackend for AgentAcpBackend {
             ));
         }
         let stage_scope = StageScope::for_handler(request.context, &request.node.id);
-        let on_permission = request
-            .agent_tool_runtime
-            .question_runtime()
+        let question_runtime = request.agent_tool_runtime.question_runtime();
+        let on_permission = question_runtime
+            .clone()
             .map(|runtime| permission_handler(runtime, request.cancel_token.clone()));
+        let on_ask =
+            question_runtime.map(|runtime| ask_handler(runtime, request.cancel_token.clone()));
         self.run_turn(
             request.node,
             request.prompt.to_string(),
@@ -543,6 +548,7 @@ impl CodergenBackend for AgentAcpBackend {
             request.sandbox,
             request.cancel_token,
             on_permission,
+            on_ask,
         )
         .await
     }
@@ -582,6 +588,44 @@ fn permission_handler(
                 Err(error) => {
                     tracing::warn!(%error, "permission interview failed; cancelling request");
                     RequestPermissionOutcome::Cancelled
+                }
+            }
+        })
+    })
+}
+
+/// Routes one `_factory/ask` through the run's interview runtime as a
+/// freeform conversational question; the operator's reply text returns to the
+/// waiting agent. Interrupted or non-text outcomes return `None`.
+fn ask_handler(
+    runtime: Arc<dyn AgentQuestionRuntime>,
+    cancel_token: CancellationToken,
+) -> AcpAskHandler {
+    Arc::new(move |text: String| {
+        let runtime = Arc::clone(&runtime);
+        let cancel_token = cancel_token.clone();
+        Box::pin(async move {
+            let question = AgentQuestion {
+                original_id: None,
+                original_question: text.clone(),
+                header: None,
+                text,
+                question_type: QuestionType::Freeform,
+                options: Vec::new(),
+                allow_freeform: true,
+            };
+            let ask_id = format!("factory-ask-{}", ulid::Ulid::new());
+            match runtime
+                .ask_questions(&ask_id, vec![question], cancel_token)
+                .await
+            {
+                Ok(answers) => answers
+                    .first()
+                    .filter(|answer| answer.status == AgentQuestionAnswerStatus::Answered)
+                    .and_then(|answer| answer.answers.first().cloned()),
+                Err(error) => {
+                    tracing::warn!(%error, "conversational ask failed");
+                    None
                 }
             }
         })

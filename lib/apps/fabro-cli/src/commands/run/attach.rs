@@ -654,6 +654,7 @@ async fn submit_server_interview_answer(
         AnswerValue::Selected(key) => types::SubmitAnswerSelectedRequest {
             kind:       types::SubmitAnswerSelectedRequestKind::Selected,
             option_key: key.clone(),
+            text:       None,
         }
         .into(),
         AnswerValue::MultiSelected(keys) => types::SubmitAnswerMultiSelectedRequest {

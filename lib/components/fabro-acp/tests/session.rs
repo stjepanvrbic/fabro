@@ -52,6 +52,7 @@ async fn stdio_spawn_failure_returns_sandbox_error() {
         on_activity: None,
         live_control: None,
         on_permission: None,
+        on_ask: None,
     })
     .await;
     let Err(error) = result else {
@@ -87,6 +88,7 @@ async fn clean_stdio_exit_after_final_response_completes_turn() {
         on_activity: None,
         live_control: None,
         on_permission: None,
+        on_ask: None,
     })
     .await
     .expect("clean ACP process exit should not preempt final protocol response");
@@ -122,6 +124,7 @@ async fn session_lifecycle_initializes_sends_prompt_and_aggregates_text() {
         on_activity: None,
         live_control: None,
         on_permission: None,
+        on_ask: None,
     })
     .await
     .expect("run ACP turn");
@@ -179,6 +182,7 @@ async fn steering_sends_followup_session_prompt_over_acp() {
             }
         })),
         on_permission: None,
+        on_ask: None,
         live_control: Some(AcpLiveControl::new(control_handle)),
     })
     .await
@@ -250,6 +254,7 @@ async fn interrupt_then_steer_sends_cancel_then_followup_session_prompt_over_acp
             }
         })),
         on_permission: None,
+        on_ask: None,
         live_control: Some(AcpLiveControl::new(control_handle)),
     })
     .await
@@ -319,6 +324,7 @@ async fn inline_interrupt_terminates_agent_that_ignores_cancel() {
             }
         })),
         on_permission: None,
+        on_ask: None,
         live_control: Some(AcpLiveControl::new(control_handle)),
     })
     .await
@@ -365,6 +371,78 @@ async fn permission_request_selects_allow_always() {
         .expect("read permission record");
     assert!(permission.contains(r#""outcome":"selected""#));
     assert!(permission.contains(r#""optionId":"always""#));
+}
+
+#[tokio::test]
+async fn factory_ask_routed_to_handler_and_reply_reaches_agent() {
+    let tempdir = tempfile::tempdir().expect("create tempdir");
+    let ask_path = tempdir.path().join("ask.json");
+
+    let handler: fabro_acp::AcpAskHandler = Arc::new(|text| {
+        Box::pin(async move {
+            assert_eq!(text, "Which color?");
+            Some("blue".to_string())
+        })
+    });
+    let script_path = tempdir.path().join("fake_acp_agent.py");
+    write(&script_path, fake_acp_agent_script())
+        .await
+        .expect("write fake ACP agent");
+    let raw_command = format!("python3 {}", shell_quote(&script_path.to_string_lossy()));
+    let command = AcpProcessSpec::from_command_attr(&raw_command).expect("parse ACP command");
+    let sandbox: Arc<dyn Sandbox> = Arc::new(LocalSandbox::new(tempdir.path().to_path_buf()));
+
+    let result = run_acp_turn(AcpRunRequest {
+        command,
+        prompt: "hello".to_string(),
+        cwd: tempdir.path().to_string_lossy().into_owned(),
+        timeout_ms: Some(ACP_TEST_TIMEOUT_MS),
+        env: HashMap::from([
+            ("ACP_MODE".to_string(), "ask".to_string()),
+            ("LC_ALL".to_string(), "C".to_string()),
+            (
+                "ACP_ASK_RECORD".to_string(),
+                ask_path.to_string_lossy().into_owned(),
+            ),
+        ]),
+        sandbox,
+        cancel_token: CancellationToken::new(),
+        on_activity: None,
+        live_control: None,
+        on_permission: None,
+        on_ask: Some(handler),
+    })
+    .await
+    .expect("run ACP turn");
+
+    assert_eq!(result.text, "answered: blue");
+    let record = read_to_string(ask_path).await.expect("read ask record");
+    assert!(record.contains(r#""text":"blue""#), "{record}");
+}
+
+#[tokio::test]
+async fn factory_ask_without_handler_is_rejected() {
+    let tempdir = tempfile::tempdir().expect("create tempdir");
+    let ask_path = tempdir.path().join("ask.json");
+
+    let result = run_fake_agent(
+        tempdir.path(),
+        HashMap::from([
+            ("ACP_MODE".to_string(), "ask".to_string()),
+            (
+                "ACP_ASK_RECORD".to_string(),
+                ask_path.to_string_lossy().into_owned(),
+            ),
+        ]),
+        Some(ACP_TEST_TIMEOUT_MS),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("run ACP turn");
+
+    assert_eq!(result.text, "answered: ");
+    let record = read_to_string(ask_path).await.expect("read ask record");
+    assert!(record.contains("error"), "ask should be rejected: {record}");
 }
 
 #[tokio::test]
@@ -774,6 +852,7 @@ async fn run_fake_agent_with_permission(
         on_activity: None,
         live_control: None,
         on_permission,
+        on_ask: None,
     })
     .await
 }
@@ -806,6 +885,7 @@ async fn run_fake_agent_with_activity(
         on_activity,
         live_control: None,
         on_permission: None,
+        on_ask: None,
     })
     .await
 }

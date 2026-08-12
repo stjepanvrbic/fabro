@@ -13,6 +13,7 @@ interface RunDetailTabDefinition {
 const allTabs: RunDetailTabDefinition[] = [
   { name: "Overview", path: "", count: null },
   { name: "Stages", path: "/stages", count: null },
+  { name: "Thread", path: "/thread", count: null },
   { name: "Files Changed", path: "/files", count: null },
   { name: "Children", path: "/children", count: null },
   { name: "Sandbox", path: "/sandbox", count: null, requiresSandbox: true },

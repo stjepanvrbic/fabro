@@ -156,6 +156,31 @@ for line in sys.stdin:
                             record.write("session/cancel\n")
                     record_methods()
                     time.sleep(60)
+        if mode == "ask":
+            send({
+                "jsonrpc": "2.0",
+                "id": "ask-1",
+                "method": "_factory/ask",
+                "params": {"sessionId": session_id, "text": "Which color?"}
+            })
+            ask_response = json.loads(sys.stdin.readline())
+            with open(os.environ["ACP_ASK_RECORD"], "w", encoding="utf-8") as record:
+                record.write(json.dumps(ask_response, separators=(",", ":")))
+            answer = (ask_response.get("result") or {}).get("text", "")
+            send({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "answered: " + answer}
+                    }
+                }
+            })
+            respond(message, {"stopReason": "end_turn"})
+            record_methods()
+            break
         if mode == "permission":
             send({
                 "jsonrpc": "2.0",

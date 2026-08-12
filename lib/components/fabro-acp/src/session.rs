@@ -31,6 +31,15 @@ pub type AcpSteerPromptCallback = Arc<dyn Fn(String, Option<Principal>) + Send +
 pub type AcpPermissionHandler = Arc<
     dyn Fn(RequestPermissionRequest) -> BoxFuture<'static, RequestPermissionOutcome> + Send + Sync,
 >;
+/// Answers one `_factory/ask` extension request: the agent's conversational
+/// question goes to the operator and the reply text comes back. `None` means
+/// no answer (interrupted/cancelled); the agent gets a JSON-RPC error. The
+/// node-timeout clock pauses while an ask is pending, like permissions.
+pub type AcpAskHandler = Arc<dyn Fn(String) -> BoxFuture<'static, Option<String>> + Send + Sync>;
+
+/// Method name of the conversational-ask extension (both ends are ours; see
+/// the ACP spec's underscore-prefixed extension convention).
+pub const FACTORY_ASK_METHOD: &str = "_factory/ask";
 
 const CANCEL_GRACE_PERIOD: Duration = Duration::from_millis(500);
 
@@ -179,6 +188,8 @@ pub struct AcpRunRequest {
     /// Routes `session/request_permission` to a human decision. `None` keeps
     /// the historical auto-approve (most permissive option wins).
     pub on_permission: Option<AcpPermissionHandler>,
+    /// Answers `_factory/ask` conversational questions. `None` rejects them.
+    pub on_ask:        Option<AcpAskHandler>,
 }
 
 #[derive(Debug)]
@@ -201,6 +212,7 @@ pub async fn run_acp_turn(request: AcpRunRequest) -> Result<AcpRunResult, AcpErr
         on_activity,
         live_control,
         on_permission,
+        on_ask,
     } = request;
     let live_control = live_control.unwrap_or_default();
     let start = std::time::Instant::now();
@@ -208,8 +220,10 @@ pub async fn run_acp_turn(request: AcpRunRequest) -> Result<AcpRunResult, AcpErr
     let read_cancel_token = cancel_token.clone();
     let run_cancel_token = cancel_token.clone();
     let permission_cancel_token = cancel_token.clone();
+    let ask_cancel_token = cancel_token.clone();
     let pending_permissions = Arc::new(AtomicUsize::new(0));
     let pending_for_handler = Arc::clone(&pending_permissions);
+    let pending_for_ask = Arc::clone(&pending_permissions);
     let transport = SandboxAcpTransport::new(command, cwd.clone(), env, sandbox, state.clone());
 
     let run = Client
@@ -226,6 +240,35 @@ pub async fn run_acp_turn(request: AcpRunRequest) -> Result<AcpRunResult, AcpErr
                     select_permission_outcome(&request)
                 };
                 responder.respond(RequestPermissionResponse::new(outcome))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: agent_client_protocol::UntypedMessage, responder, _connection| {
+                if request.method() != FACTORY_ASK_METHOD {
+                    return responder
+                        .respond_with_error(agent_client_protocol::Error::method_not_found());
+                }
+                let text = request
+                    .params
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let reply = if ask_cancel_token.is_cancelled() || text.is_empty() {
+                    None
+                } else if let Some(handler) = on_ask.as_ref() {
+                    let _pending = PendingPermission::new(&pending_for_ask);
+                    handler(text).await
+                } else {
+                    None
+                };
+                match reply {
+                    Some(text) => responder.respond(serde_json::json!({ "text": text })),
+                    None => responder.respond_with_error(
+                        agent_client_protocol::Error::internal_error().data("ask unanswered"),
+                    ),
+                }
             },
             agent_client_protocol::on_receive_request!(),
         )

@@ -9868,6 +9868,12 @@ components:
           type: string
           description: Key of the selected option.
           example: option_a
+        text:
+          type: string
+          description: >
+            Optional freeform message accompanying the selected option. Human
+            gates record it in the run context alongside the verdict.
+          example: "Approved — keep the API surface small."
 
     SubmitAnswerMultiSelectedRequest:
       type: object
