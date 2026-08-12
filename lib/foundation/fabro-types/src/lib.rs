@@ -190,7 +190,7 @@ pub use workflow_path::{
     MAX_WORKFLOW_PATH_BYTES, MAX_WORKFLOW_PATH_COMPONENTS, WorkflowPath, WorkflowPathParseError,
 };
 pub use workflow_version::{
-    MAX_WORKFLOW_VERSION_BYTES, MAX_WORKFLOW_VERSION_FILE_BYTES, MAX_WORKFLOW_VERSION_FILES,
-    WorkflowVersion, WorkflowVersionShapeError,
+    MAX_WORKFLOW_VERSION_BYTES, MAX_WORKFLOW_VERSION_DEPENDENCIES, MAX_WORKFLOW_VERSION_FILE_BYTES,
+    MAX_WORKFLOW_VERSION_FILES, WorkflowVersion, WorkflowVersionShapeError,
 };
 pub use workflow_version_id::{WorkflowVersionId, WorkflowVersionIdParseError};

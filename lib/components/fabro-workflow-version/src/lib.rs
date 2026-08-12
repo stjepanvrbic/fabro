@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
+use fabro_config::parse::{SettingsSource, validate_settings_source};
 use fabro_config::{EnvironmentDockerfileLayer, EnvironmentImageLayer, SettingsLayer};
 use fabro_graphviz::parser;
 use fabro_template::{
@@ -111,6 +112,8 @@ fn validate_config(version: &WorkflowVersion) -> Result<(), WorkflowVersionError
     };
     let layer = source
         .parse::<SettingsLayer>()
+        .map_err(|source| WorkflowVersionError::Config { source })?;
+    validate_settings_source(&layer, SettingsSource::Workflow)
         .map_err(|source| WorkflowVersionError::Config { source })?;
 
     if let Some(configured) = layer
@@ -297,7 +300,7 @@ fn manifest_path(path: &WorkflowPath) -> ManifestPath {
 
 #[cfg(test)]
 mod tests {
-    use fabro_types::{RunBlobId, WorkflowPath, WorkflowVersion, WorkflowVersionId};
+    use fabro_types::{BlobHash, WorkflowPath, WorkflowVersion, WorkflowVersionId};
 
     use super::{ValidatedWorkflowVersion, WorkflowVersionError};
 
@@ -306,7 +309,7 @@ mod tests {
     }
 
     fn dependency_id(value: &[u8]) -> WorkflowVersionId {
-        RunBlobId::new(value).into()
+        BlobHash::new(value).into()
     }
 
     fn version_with(
@@ -456,6 +459,24 @@ dockerfile = { path = "docker/run.Dockerfile" }
         .unwrap();
 
         assert_eq!(version.version().entrypoint(), &path("workflow.fabro"));
+    }
+
+    #[test]
+    fn rejects_server_managed_environment_cwd_in_workflow_config() {
+        let error = version_with(
+            [
+                ("workflow.fabro", "digraph W {}"),
+                (
+                    "workflow.toml",
+                    "_version = 1\n[environments.local]\nprovider = \"local\"\ncwd = \"/tmp\"\n",
+                ),
+            ],
+            [],
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, WorkflowVersionError::Config { .. }));
+        assert!(error.to_string().contains("workflow.toml is invalid"));
     }
 
     #[test]

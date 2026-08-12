@@ -9,6 +9,7 @@ use thiserror::Error;
 use crate::{WorkflowPath, WorkflowVersionId};
 
 pub const MAX_WORKFLOW_VERSION_FILES: usize = 512;
+pub const MAX_WORKFLOW_VERSION_DEPENDENCIES: usize = 512;
 pub const MAX_WORKFLOW_VERSION_FILE_BYTES: usize = 512 * 1024;
 pub const MAX_WORKFLOW_VERSION_BYTES: usize = 2 * 1024 * 1024;
 
@@ -16,6 +17,8 @@ pub const MAX_WORKFLOW_VERSION_BYTES: usize = 2 * 1024 * 1024;
 pub enum WorkflowVersionShapeError {
     #[error("workflow version has {actual} files; maximum is {maximum}")]
     TooManyFiles { actual: usize, maximum: usize },
+    #[error("workflow version has {actual} workflow dependencies; maximum is {maximum}")]
+    TooManyWorkflowDependencies { actual: usize, maximum: usize },
     #[error("workflow file `{path}` is {actual} bytes; maximum is {maximum}")]
     FileTooLarge {
         path:    WorkflowPath,
@@ -106,6 +109,12 @@ impl WorkflowVersion {
                 maximum: MAX_WORKFLOW_VERSION_FILES,
             });
         }
+        if self.workflow_dependencies.len() > MAX_WORKFLOW_VERSION_DEPENDENCIES {
+            return Err(WorkflowVersionShapeError::TooManyWorkflowDependencies {
+                actual:  self.workflow_dependencies.len(),
+                maximum: MAX_WORKFLOW_VERSION_DEPENDENCIES,
+            });
+        }
         for (path, content) in &self.files {
             if content.len() > MAX_WORKFLOW_VERSION_FILE_BYTES {
                 return Err(WorkflowVersionShapeError::FileTooLarge {
@@ -126,19 +135,21 @@ impl WorkflowVersion {
     fn validate_path_collisions(&self) -> Result<(), WorkflowVersionShapeError> {
         // Keys are unique within each map, so equality can only collide
         // across files and workflow dependencies.
-        let paths = self
+        let mut paths = self
             .files
             .keys()
             .chain(self.workflow_dependencies.keys())
             .collect::<Vec<_>>();
-        for (index, first) in paths.iter().enumerate() {
-            for second in &paths[index + 1..] {
-                if first == second || first.is_ancestor_of(second) || second.is_ancestor_of(first) {
-                    return Err(WorkflowVersionShapeError::PathCollision {
-                        first:  (*first).clone(),
-                        second: (*second).clone(),
-                    });
-                }
+        paths.sort_unstable();
+        for pair in paths.windows(2) {
+            let [first, second] = pair else {
+                unreachable!("a two-item window must contain two paths")
+            };
+            if first == second || first.is_ancestor_of(second) {
+                return Err(WorkflowVersionShapeError::PathCollision {
+                    first:  (*first).clone(),
+                    second: (*second).clone(),
+                });
             }
         }
         Ok(())
@@ -211,10 +222,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        MAX_WORKFLOW_VERSION_BYTES, MAX_WORKFLOW_VERSION_FILE_BYTES, MAX_WORKFLOW_VERSION_FILES,
-        WorkflowVersion, WorkflowVersionShapeError,
+        MAX_WORKFLOW_VERSION_BYTES, MAX_WORKFLOW_VERSION_DEPENDENCIES,
+        MAX_WORKFLOW_VERSION_FILE_BYTES, MAX_WORKFLOW_VERSION_FILES, WorkflowVersion,
+        WorkflowVersionShapeError,
     };
-    use crate::WorkflowPath;
+    use crate::{BlobHash, WorkflowPath, WorkflowVersionId};
 
     fn path(value: &str) -> WorkflowPath {
         value.parse().unwrap()
@@ -357,6 +369,33 @@ mod tests {
             WorkflowVersion::new(path("workflow.fabro"), exact_version_files, BTreeMap::new())
                 .unwrap_err(),
             WorkflowVersionShapeError::VersionTooLarge { .. }
+        ));
+    }
+
+    #[test]
+    fn enforces_workflow_dependency_count_boundary() {
+        let dependencies = (0..MAX_WORKFLOW_VERSION_DEPENDENCIES)
+            .map(|index| {
+                (
+                    path(&format!("dependency-{index:03}.fabro")),
+                    WorkflowVersionId::from(BlobHash::new(index.to_string().as_bytes())),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let files = BTreeMap::from([(path("workflow.fabro"), "digraph W {}".to_owned())]);
+        assert!(
+            WorkflowVersion::new(path("workflow.fabro"), files.clone(), dependencies.clone())
+                .is_ok()
+        );
+
+        let mut oversized = dependencies;
+        oversized.insert(
+            path("too-many.fabro"),
+            WorkflowVersionId::from(BlobHash::new(b"too many")),
+        );
+        assert!(matches!(
+            WorkflowVersion::new(path("workflow.fabro"), files, oversized).unwrap_err(),
+            WorkflowVersionShapeError::TooManyWorkflowDependencies { .. }
         ));
     }
 

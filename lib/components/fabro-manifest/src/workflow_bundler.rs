@@ -12,8 +12,8 @@ use fabro_template::{
     RecordingTemplateStore, TemplateContext, TemplateDependencyClosure, TemplateRenderMode,
     TemplateSource, validate_static_reference, visit_graph_references,
 };
-use fabro_types::graph::ReferenceKind;
 use fabro_types::ManifestPath;
+use fabro_types::graph::ReferenceKind;
 
 use crate::{manifest_path_from_absolute, normalize_absolute_path};
 
@@ -148,11 +148,7 @@ impl<'a> WorkflowBundler<'a> {
                         ReferenceKind::GraphGoalFile,
                         Some(workflow.dot_path.clone()),
                     )?;
-                    self.collect_bundled_template_includes(
-                        files,
-                        &bundled,
-                        &workflow_template_root,
-                    )
+                    self.collect_bundled_template_includes(files, &bundled, &workflow_template_root)
                 }
                 GraphReference::GoalInline { content }
                 | GraphReference::InlinePrompt { content } => self.collect_template_include_files(

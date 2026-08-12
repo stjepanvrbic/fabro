@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use fabro_store::BlobStore;
@@ -60,24 +61,8 @@ impl WorkflowVersionStore {
         version: &ValidatedWorkflowVersion,
     ) -> Result<WorkflowVersionId, WorkflowVersionStoreError> {
         let canonical = version.version().canonical_bytes()?;
-        for (path, id) in version.version().workflow_dependencies() {
-            match self.get(id).await {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    return Err(WorkflowVersionStoreError::DependencyNotFound {
-                        path: path.clone(),
-                        id:   *id,
-                    });
-                }
-                Err(source) => {
-                    return Err(WorkflowVersionStoreError::DependencyInvalid {
-                        path:   path.clone(),
-                        id:     *id,
-                        source: Box::new(source),
-                    });
-                }
-            }
-        }
+        self.validate_dependency_closure(version.version().workflow_dependencies())
+            .await?;
         self.blobs
             .write(&canonical)
             .await
@@ -86,6 +71,18 @@ impl WorkflowVersionStore {
     }
 
     pub async fn get(
+        &self,
+        id: &WorkflowVersionId,
+    ) -> Result<Option<ValidatedWorkflowVersion>, WorkflowVersionStoreError> {
+        let Some(version) = self.load_one(id).await? else {
+            return Ok(None);
+        };
+        self.validate_dependency_closure(version.version().workflow_dependencies())
+            .await?;
+        Ok(Some(version))
+    }
+
+    async fn load_one(
         &self,
         id: &WorkflowVersionId,
     ) -> Result<Option<ValidatedWorkflowVersion>, WorkflowVersionStoreError> {
@@ -106,6 +103,48 @@ impl WorkflowVersionStore {
             return Err(WorkflowVersionStoreError::NonCanonical { id: *id });
         }
         Ok(Some(validated))
+    }
+
+    async fn validate_dependency_closure(
+        &self,
+        dependencies: &BTreeMap<WorkflowPath, WorkflowVersionId>,
+    ) -> Result<(), WorkflowVersionStoreError> {
+        let mut pending = dependencies
+            .iter()
+            .map(|(path, id)| (path.clone(), *id))
+            .collect::<VecDeque<_>>();
+        let mut visited = HashSet::new();
+
+        while let Some((path, id)) = pending.pop_front() {
+            if !visited.insert(id) {
+                continue;
+            }
+            match self.load_one(&id).await {
+                Ok(Some(dependency)) => {
+                    pending.extend(
+                        dependency
+                            .version()
+                            .workflow_dependencies()
+                            .iter()
+                            .map(|(path, id)| (path.clone(), *id)),
+                    );
+                }
+                Ok(None) => {
+                    return Err(WorkflowVersionStoreError::DependencyNotFound { path, id });
+                }
+                // Persistence failures are server faults, not evidence that
+                // the caller supplied an invalid dependency.
+                Err(source @ WorkflowVersionStoreError::Storage { .. }) => return Err(source),
+                Err(source) => {
+                    return Err(WorkflowVersionStoreError::DependencyInvalid {
+                        path,
+                        id,
+                        source: Box::new(source),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -158,7 +197,7 @@ mod tests {
         let (blobs, store) = stores().await;
         let version = version("digraph W {}", BTreeMap::new());
         let expected_bytes = version.version().canonical_bytes().unwrap();
-        let expected_id = WorkflowVersionId::from(fabro_types::RunBlobId::new(&expected_bytes));
+        let expected_id = WorkflowVersionId::from(fabro_types::BlobHash::new(&expected_bytes));
 
         let id = store.put(&version).await.unwrap();
         assert_eq!(id, expected_id);
@@ -188,14 +227,14 @@ mod tests {
     async fn dependency_must_be_stored_first() {
         let (blobs, store) = stores().await;
         let child = version("digraph Child {}", BTreeMap::new());
-        let child_id = WorkflowVersionId::from(fabro_types::RunBlobId::new(
+        let child_id = WorkflowVersionId::from(fabro_types::BlobHash::new(
             &child.version().canonical_bytes().unwrap(),
         ));
         let root = version(
             r#"digraph Root { child [stack.child_workflow="child.fabro"] }"#,
             BTreeMap::from([(path("child.fabro"), child_id)]),
         );
-        let root_id = WorkflowVersionId::from(fabro_types::RunBlobId::new(
+        let root_id = WorkflowVersionId::from(fabro_types::BlobHash::new(
             &root.version().canonical_bytes().unwrap(),
         ));
 
@@ -207,6 +246,37 @@ mod tests {
         assert!(!blobs.exists(&root_id.into()).await.unwrap());
         assert_eq!(store.put(&child).await.unwrap(), child_id);
         assert!(store.put(&root).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dependency_closure_must_be_complete_before_root_write() {
+        let (blobs, store) = stores().await;
+        let missing_grandchild_id = WorkflowVersionId::from(fabro_types::BlobHash::new(b"missing"));
+        let child = version(
+            r#"digraph Child { grandchild [stack.child_workflow="grandchild.fabro"] }"#,
+            BTreeMap::from([(path("grandchild.fabro"), missing_grandchild_id)]),
+        );
+        let child_bytes = child.version().canonical_bytes().unwrap();
+        let child_id = WorkflowVersionId::from(blobs.write(&child_bytes).await.unwrap());
+        let root = version(
+            r#"digraph Root { child [stack.child_workflow="child.fabro"] }"#,
+            BTreeMap::from([(path("child.fabro"), child_id)]),
+        );
+        let root_id = WorkflowVersionId::from(fabro_types::BlobHash::new(
+            &root.version().canonical_bytes().unwrap(),
+        ));
+
+        assert!(matches!(
+            store.put(&root).await.unwrap_err(),
+            WorkflowVersionStoreError::DependencyNotFound { id, .. }
+                if id == missing_grandchild_id
+        ));
+        assert!(!blobs.exists(&root_id.into()).await.unwrap());
+        assert!(matches!(
+            store.get(&child_id).await.unwrap_err(),
+            WorkflowVersionStoreError::DependencyNotFound { id, .. }
+                if id == missing_grandchild_id
+        ));
     }
 
     #[tokio::test]

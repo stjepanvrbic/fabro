@@ -4,19 +4,19 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::RunBlobId;
+use crate::BlobHash;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(into = "String", try_from = "String")]
-pub struct WorkflowVersionId(RunBlobId);
+pub struct WorkflowVersionId(BlobHash);
 
-impl From<RunBlobId> for WorkflowVersionId {
-    fn from(value: RunBlobId) -> Self {
+impl From<BlobHash> for WorkflowVersionId {
+    fn from(value: BlobHash) -> Self {
         Self(value)
     }
 }
 
-impl From<WorkflowVersionId> for RunBlobId {
+impl From<WorkflowVersionId> for BlobHash {
     fn from(value: WorkflowVersionId) -> Self {
         value.0
     }
@@ -42,13 +42,13 @@ impl FromStr for WorkflowVersionId {
     type Err = WorkflowVersionIdParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        // `RunBlobId` enforces length and hex charset but accepts uppercase digits;
+        // `BlobHash` enforces length and hex charset but accepts uppercase digits;
         // the canonical wire form is lowercase only.
         if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
             return Err(WorkflowVersionIdParseError);
         }
         value
-            .parse::<RunBlobId>()
+            .parse::<BlobHash>()
             .map(Self)
             .map_err(|_| WorkflowVersionIdParseError)
     }
@@ -64,19 +64,19 @@ impl TryFrom<String> for WorkflowVersionId {
 
 #[cfg(test)]
 mod tests {
-    use crate::{RunBlobId, WorkflowVersionId};
+    use crate::{BlobHash, WorkflowVersionId};
 
     #[test]
     fn conversion_preserves_digest_and_display() {
-        let blob_id = RunBlobId::new(b"workflow");
+        let blob_id = BlobHash::new(b"workflow");
         let version_id = WorkflowVersionId::from(blob_id);
         assert_eq!(version_id.to_string(), blob_id.to_string());
-        assert_eq!(RunBlobId::from(version_id), blob_id);
+        assert_eq!(BlobHash::from(version_id), blob_id);
     }
 
     #[test]
     fn parse_and_serde_require_lowercase_hex() {
-        let value = RunBlobId::new(b"workflow").to_string();
+        let value = BlobHash::new(b"workflow").to_string();
         let id: WorkflowVersionId = value.parse().unwrap();
         assert_eq!(serde_json::to_value(id).unwrap(), value);
         assert!(value.to_uppercase().parse::<WorkflowVersionId>().is_err());

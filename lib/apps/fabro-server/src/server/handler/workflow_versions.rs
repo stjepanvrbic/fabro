@@ -83,8 +83,7 @@ fn json_rejection(rejection: JsonRejection) -> ApiError {
 
 fn store_error(err: WorkflowVersionStoreError) -> ApiError {
     match err {
-        err @ (WorkflowVersionStoreError::DependencyNotFound { .. }
-        | WorkflowVersionStoreError::DependencyInvalid { .. }) => ApiError::with_code(
+        err @ WorkflowVersionStoreError::DependencyNotFound { .. } => ApiError::with_code(
             StatusCode::UNPROCESSABLE_ENTITY,
             err.to_string(),
             DEPENDENCY_NOT_FOUND_CODE,
@@ -245,8 +244,30 @@ mod tests {
     async fn unavailable_dependency_has_specific_code() {
         let state = TestAppStateBuilder::new().build();
         let app = test_support::build_test_router(Arc::clone(&state));
-        let missing_id = WorkflowVersionId::from(fabro_types::RunBlobId::new(b"missing"));
-        let arbitrary_id = WorkflowVersionId::from(
+        let missing_id = WorkflowVersionId::from(fabro_types::BlobHash::new(b"missing"));
+        let root = json!({
+            "entrypoint": "workflow.fabro",
+            "files": {
+                "workflow.fabro": "digraph W { child [stack.child_workflow=\"child.fabro\"] }"
+            },
+            "workflow_dependencies": { "child.fabro": missing_id }
+        });
+        let response = app
+            .oneshot(request(serde_json::to_vec(&root).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            error_code(&response_json(response).await),
+            DEPENDENCY_NOT_FOUND_CODE
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_stored_dependency_returns_curated_internal_error() {
+        let state = TestAppStateBuilder::new().build();
+        let app = test_support::build_test_router(Arc::clone(&state));
+        let dependency_id = WorkflowVersionId::from(
             state
                 .store_ref()
                 .blobs()
@@ -256,26 +277,25 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        let root = json!({
+            "entrypoint": "workflow.fabro",
+            "files": {
+                "workflow.fabro": "digraph W { child [stack.child_workflow=\"child.fabro\"] }"
+            },
+            "workflow_dependencies": { "child.fabro": dependency_id }
+        });
 
-        for dependency_id in [missing_id, arbitrary_id] {
-            let root = json!({
-                "entrypoint": "workflow.fabro",
-                "files": {
-                    "workflow.fabro": "digraph W { child [stack.child_workflow=\"child.fabro\"] }"
-                },
-                "workflow_dependencies": { "child.fabro": dependency_id }
-            });
-            let response = app
-                .clone()
-                .oneshot(request(serde_json::to_vec(&root).unwrap()))
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-            assert_eq!(
-                error_code(&response_json(response).await),
-                DEPENDENCY_NOT_FOUND_CODE
-            );
-        }
+        let response = app
+            .oneshot(request(serde_json::to_vec(&root).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response_json(response).await;
+        assert_eq!(
+            body["errors"][0]["detail"],
+            "workflow version store operation failed"
+        );
+        assert!(!body.to_string().contains("cannot be decoded"));
     }
 
     #[tokio::test]

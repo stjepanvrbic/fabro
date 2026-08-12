@@ -15,7 +15,7 @@
 
 
 /**
- * Complete immutable package for one rooted workflow. It contains at most 512 files, each at most 512 KiB of UTF-8 content, and its compact canonical JSON representation is at most 2 MiB.
+ * Complete immutable package for one rooted workflow. It contains at most 512 files and 512 workflow dependencies, each file is at most 512 KiB of UTF-8 content, and its compact canonical JSON representation is at most 2 MiB.
  */
 export interface WorkflowVersion {
     /**
