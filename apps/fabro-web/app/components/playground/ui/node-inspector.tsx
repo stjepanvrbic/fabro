@@ -10,6 +10,7 @@ const SHAPE_KIND_LABELS: Record<Shape, string> = {
   diamond:       "conditional branch",
   component:     "fan-out parallel",
   tripleoctagon: "merge parallel",
+  insulator:     "wait",
   house:         "sub-workflow",
   mdiamond:      "start (terminal)",
   msquare:       "exit (terminal)",

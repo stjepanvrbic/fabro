@@ -76,6 +76,31 @@
   --color-focus: rgba(103, 178, 215, 0.4);
   /* Text color that sits on --color-teal-500 primary fills. */
   --color-on-primary: #0F1729;
+
+  /* ── Factory tokens (dashboard design record, 2026-08-12) ──
+     Warm charcoal world for factory surfaces (the workflow editor today).
+     Color roles are exclusive: amber = waiting-on-you only, glow = agent
+     working only — neither appears in the editor. One green family: filled
+     = the go action, text = confirmations. Red = failures, loud. */
+  --font-poppins: "Poppins", "Segoe UI", system-ui, sans-serif;
+  --color-fac-ground: #1b1918;
+  --color-fac-card: #232120;
+  --color-fac-well: #171514;
+  --color-fac-ink: #f0eeec;
+  --color-fac-ink-2: #d8d5d2;
+  --color-fac-label: #cbc7c4;
+  --color-fac-chip: #b3afac;
+  --color-fac-muted: #969290;
+  --color-fac-dim: #8f8b88;
+  --color-fac-line: rgba(255, 255, 255, 0.05);
+  --color-fac-line-strong: rgba(255, 255, 255, 0.09);
+  --color-fac-hover: rgba(255, 255, 255, 0.045);
+  --color-fac-go: #8fd460;
+  --color-fac-go-text: #a8de7c;
+  --color-fac-on-go: #1b1918;
+  --color-fac-red: #e0756c;
+  --color-fac-red-bg: #261a18;
+  --color-fac-red-line: rgba(224, 117, 108, 0.35);
 }
 
 /* ── Chart variables ── */
@@ -86,6 +111,26 @@
 }
 
 /* ── Background atmosphere ── */
+
+/* Factory ground: warm charcoal with a faint warm top glow and a dot grid. */
+.fac-ground {
+  background:
+    radial-gradient(900px 320px at 70% -10%, rgba(120, 100, 80, 0.1), transparent 60%),
+    radial-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    var(--color-fac-ground);
+  background-size:
+    auto,
+    22px 22px,
+    auto;
+}
+
+/* Factory card: floats on shadow, barely-there border. */
+.fac-card {
+  background: var(--color-fac-card);
+  border: 1px solid var(--color-fac-line);
+  border-radius: 14px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
 
 .bg-atmosphere {
   background-color: var(--color-page);

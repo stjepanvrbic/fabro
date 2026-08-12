@@ -125,4 +125,12 @@ export const queryKeys = {
     list: () => ["mcp-servers", "list"] as const,
     detail: (id: string) => ["mcp-servers", "detail", id] as const,
   },
+  editor: {
+    workflows: (repo: string) => ["editor", "workflows", repo] as const,
+    workflowFile: (repo: string, path: string) =>
+      ["editor", "workflow-file", repo, path] as const,
+    repoStatus: (repo: string) => ["editor", "repo-status", repo] as const,
+    skills: (repo: string) => ["editor", "skills", repo] as const,
+    validate: (source: string) => ["editor", "validate", source] as const,
+  },
 };

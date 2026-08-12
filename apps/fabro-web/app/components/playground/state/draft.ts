@@ -18,6 +18,7 @@ export type Shape =
   | "diamond" // conditional branch
   | "component" // fan-out parallel
   | "tripleoctagon" // merge parallel
+  | "insulator" // wait
   | "house" // sub-workflow
   | "mdiamond" // start (terminal)
   | "msquare"; // exit (terminal)
@@ -30,6 +31,7 @@ export const ALL_SHAPES: readonly Shape[] = [
   "diamond",
   "component",
   "tripleoctagon",
+  "insulator",
   "house",
   "mdiamond",
   "msquare",

@@ -8,6 +8,7 @@ import {
   AuthApi,
   AutomationsApi,
   Configuration,
+  EditorApi,
   EnvironmentsApi,
   HumanInTheLoopApi,
   InsightsApi,
@@ -83,6 +84,12 @@ export const automationsApi = new AutomationsApi(
   "",
   generatedAxios,
 );
+export const editorApi = new EditorApi(
+  generatedApiConfiguration,
+  "",
+  generatedAxios,
+);
+
 export const environmentsApi = new EnvironmentsApi(
   generatedApiConfiguration,
   "",
